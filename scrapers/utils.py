@@ -11,7 +11,7 @@ def get_supabase_client():
 
 
 def generate_fingerprint(title, agency, due_date=None):
-    raw = title.lower().strip() + agency.lower().strip() + (due_date or "")
+    raw = (title or "").lower().strip() + (agency or "").lower().strip() + (due_date or "")
     return hashlib.md5(raw.encode()).hexdigest()
 
 
