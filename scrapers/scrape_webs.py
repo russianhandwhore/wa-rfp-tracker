@@ -97,32 +97,6 @@ def deduplicate(rfps):
     return list(seen.values())
 
 
-async def get_pagination_links(page):
-    from bs4 import BeautifulSoup
-    html = await page.content()
-    soup = BeautifulSoup(html, "lxml")
-    pagination_row = soup.find("td", {"align": "center"})
-    if not pagination_row:
-        return []
-    links = pagination_row.find_all("a")
-    return [a.get_text().strip() for a in links]
-
-
-async def click_page(page, page_num):
-    try:
-        links = await page.query_selector_all("td[align='center'] a")
-        for link in links:
-            text = await link.inner_text()
-            if text.strip() == str(page_num):
-                await link.click()
-                await page.wait_for_selector("#DataGrid1", timeout=30000)
-                return True
-        return False
-    except Exception as e:
-        print("Error clicking page " + str(page_num) + ": " + str(e))
-        return False
-
-
 async def scrape_all_pages():
     all_rfps = []
     async with async_playwright() as p:
@@ -139,14 +113,14 @@ async def scrape_all_pages():
             await browser.close()
             return all_rfps
 
-        current_page = 1
+        page_num = 1
         max_pages = 25
 
-        while current_page <= max_pages:
-            print("Scraping page " + str(current_page) + "...")
+        while page_num <= max_pages:
+            print("Scraping page " + str(page_num) + "...")
             html = await page.content()
             rfps = parse_rfps_from_html(html)
-            print("Found " + str(len(rfps)) + " RFPs on page " + str(current_page))
+            print("Found " + str(len(rfps)) + " RFPs on page " + str(page_num))
 
             if not rfps:
                 print("No RFPs found, stopping")
@@ -154,31 +128,53 @@ async def scrape_all_pages():
 
             all_rfps.extend(rfps)
 
-            next_page = current_page + 1
-            clicked = await click_page(page, next_page)
+            try:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(html, "lxml")
+                pagination = soup.find("td", {"align": "center"})
 
-            if not clicked:
-                print("Page " + str(next_page) + " button not visible, looking for next group...")
-                try:
-                    links = await page.query_selector_all("td[align='center'] a")
-                    found_next_group = False
-                    for link in links:
-                        text = await link.inner_text()
-                        if text.strip() == "...":
-                            print("Clicking ... to load next page group")
-                            await link.click()
-                            await page.wait_for_selector("#DataGrid1", timeout=30000)
-                            clicked = await click_page(page, next_page)
-                            found_next_group = True
-                            break
-                    if not found_next_group or not clicked:
-                        print("No more pages available, done at page " + str(current_page))
-                        break
-                except Exception as e:
-                    print("Error finding next page group: " + str(e))
+                if not pagination:
+                    print("No pagination found, this is the last page")
                     break
 
-            current_page += 1
+                next_link = None
+                for a in pagination.find_all("a"):
+                    if a.get_text().strip() == str(page_num + 1):
+                        next_link = a
+                        break
+
+                if not next_link:
+                    print("No link for page " + str(page_num + 1) + ", done")
+                    break
+
+                href = next_link.get("href", "")
+                postback_match = re.search(r"__doPostBack\('([^']+)'", href)
+                if not postback_match:
+                    print("Could not parse postback from: " + href)
+                    break
+
+                control_id = postback_match.group(1)
+                print("Navigating to page " + str(page_num + 1) + " via " + control_id)
+
+                first_title_before = rfps[0]["title"] if rfps else ""
+
+                await page.evaluate("__doPostBack('" + control_id + "', '')")
+                await page.wait_for_load_state("domcontentloaded")
+                await asyncio.sleep(2)
+
+                new_html = await page.content()
+                new_rfps = parse_rfps_from_html(new_html)
+                first_title_after = new_rfps[0]["title"] if new_rfps else ""
+
+                if first_title_before == first_title_after and page_num > 1:
+                    print("Page did not change, stopping")
+                    break
+
+                page_num += 1
+
+            except Exception as e:
+                print("Pagination error on page " + str(page_num) + ": " + str(e))
+                break
 
         await browser.close()
 
