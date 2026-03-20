@@ -95,6 +95,15 @@ def scrape_webs_page(session, page_num):
     return rfps
 
 
+def deduplicate(rfps):
+    seen = {}
+    for rfp in rfps:
+        fp = rfp.get("fingerprint")
+        if fp and fp not in seen:
+            seen[fp] = rfp
+    return list(seen.values())
+
+
 def run():
     print("Starting WEBS scraper at " + str(datetime.now()))
     supabase = get_supabase_client()
@@ -124,10 +133,12 @@ def run():
             if len(rfps) < 20:
                 break
 
-        print("Total RFPs scraped: " + str(len(all_rfps)))
+        print("Total RFPs scraped before dedup: " + str(len(all_rfps)))
+        all_rfps = deduplicate(all_rfps)
+        print("Total RFPs after dedup: " + str(len(all_rfps)))
 
         if all_rfps:
-            batch_size = 100
+            batch_size = 50
             for i in range(0, len(all_rfps), batch_size):
                 batch = all_rfps[i:i + batch_size]
                 supabase.table("rfps").upsert(batch, on_conflict="fingerprint").execute()
