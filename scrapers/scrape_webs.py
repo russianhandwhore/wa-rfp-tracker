@@ -1,5 +1,5 @@
-import requests
-from bs4 import BeautifulSoup
+import asyncio
+from playwright.async_api import async_playwright
 from datetime import datetime
 import sys
 import os
@@ -20,77 +20,69 @@ def parse_due_date(date_str):
         return None
 
 
-def scrape_webs_page(session, page_num):
+def parse_rfps_from_html(html):
+    from bs4 import BeautifulSoup
     rfps = []
-    try:
-        response = session.get(BASE_URL, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }, timeout=30)
+    soup = BeautifulSoup(html, "lxml")
+    grid = soup.find("table", {"id": "DataGrid1"})
+    if not grid:
+        return rfps
 
-        soup = BeautifulSoup(response.text, "lxml")
-        grid = soup.find("table", {"id": "DataGrid1"})
-        if not grid:
-            print("Could not find DataGrid1 on page")
-            return rfps
+    rows = grid.find_all("tr")
+    current_rfp = {}
 
-        rows = grid.find_all("tr")
-        current_rfp = {}
+    for row in rows:
+        cells = row.find_all("td")
+        if not cells:
+            continue
 
-        for row in rows:
-            cells = row.find_all("td")
-            if not cells:
-                continue
+        link = row.find("a", href=lambda x: x and "Search_BidDetails" in str(x))
+        if link:
+            if current_rfp.get("title"):
+                rfps.append(current_rfp)
 
-            link = row.find("a", href=lambda x: x and "Search_BidDetails" in str(x))
-            if link:
-                if current_rfp.get("title"):
-                    rfps.append(current_rfp)
+            title = clean_text(link.get_text())
+            detail_url = "https://pr-webs-vendor.des.wa.gov/" + link["href"]
 
-                title = clean_text(link.get_text())
-                detail_url = "https://pr-webs-vendor.des.wa.gov/" + link["href"]
+            ref_span = row.find("b", string=re.compile(r"Ref #"))
+            ref_number = None
+            if ref_span:
+                ref_number = clean_text(ref_span.find_next_sibling(string=True))
 
-                ref_span = row.find("b", string=re.compile(r"Ref #"))
-                ref_number = None
-                if ref_span:
-                    ref_number = clean_text(ref_span.find_next_sibling(string=True))
+            contact = None
+            cell_texts = [clean_text(c.get_text()) for c in cells]
+            if len(cell_texts) >= 3:
+                contact = cell_texts[-1]
 
-                contact = None
-                cell_texts = [clean_text(c.get_text()) for c in cells]
-                if len(cell_texts) >= 3:
-                    contact = cell_texts[-1]
+            close_date = None
+            if cell_texts:
+                close_date = parse_due_date(cell_texts[0])
 
-                close_date = None
-                if cell_texts:
-                    close_date = parse_due_date(cell_texts[0])
+            current_rfp = {
+                "title": title,
+                "detail_url": detail_url,
+                "ref_number": ref_number,
+                "contact_name": contact,
+                "due_date": close_date,
+                "source_name": SOURCE_NAME,
+                "source_platform": "WEBS",
+                "source_url": BASE_URL,
+                "status": "active",
+                "agency": None,
+                "description": None,
+                "includes_inclusion_plan": False
+            }
 
-                current_rfp = {
-                    "title": title,
-                    "detail_url": detail_url,
-                    "ref_number": ref_number,
-                    "contact_name": contact,
-                    "due_date": close_date,
-                    "source_name": SOURCE_NAME,
-                    "source_platform": "WEBS",
-                    "source_url": BASE_URL,
-                    "status": "active",
-                    "agency": None,
-                    "description": None,
-                    "includes_inclusion_plan": False
-                }
+        elif current_rfp and len(cells) == 1:
+            text = clean_text(cells[0].get_text())
+            if text and not text.startswith("Additional") and not text.startswith("Includes"):
+                if not current_rfp.get("description"):
+                    current_rfp["description"] = text
+            if "Includes an Inclusion Plan: Y" in str(row):
+                current_rfp["includes_inclusion_plan"] = True
 
-            elif current_rfp and len(cells) == 1:
-                text = clean_text(cells[0].get_text())
-                if text and not text.startswith("Additional") and not text.startswith("Includes"):
-                    if not current_rfp.get("description"):
-                        current_rfp["description"] = text
-                if "Includes an Inclusion Plan: Y" in str(row):
-                    current_rfp["includes_inclusion_plan"] = True
-
-        if current_rfp.get("title"):
-            rfps.append(current_rfp)
-
-    except Exception as e:
-        print("Error scraping WEBS page " + str(page_num) + ": " + str(e))
+    if current_rfp.get("title"):
+        rfps.append(current_rfp)
 
     return rfps
 
@@ -104,38 +96,71 @@ def deduplicate(rfps):
     return list(seen.values())
 
 
+async def scrape_all_pages():
+    all_rfps = []
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        print("Loading WEBS bid calendar...")
+        await page.goto(BASE_URL, timeout=60000)
+        await page.wait_for_load_state("networkidle")
+
+        page_num = 1
+        while True:
+            print("Scraping page " + str(page_num) + "...")
+            html = await page.content()
+            rfps = parse_rfps_from_html(html)
+            print("Found " + str(len(rfps)) + " RFPs on page " + str(page_num))
+            all_rfps.extend(rfps)
+
+            try:
+                next_link = await page.query_selector("a[href*=\"__doPostBack\"][href*=\"_ctl29\"]")
+                if not next_link:
+                    next_buttons = await page.query_selector_all("td[align='center'] a")
+                    next_link = None
+                    for btn in next_buttons:
+                        text = await btn.inner_text()
+                        if text.strip() == str(page_num + 1):
+                            next_link = btn
+                            break
+
+                if not next_link:
+                    print("No more pages found, stopping at page " + str(page_num))
+                    break
+
+                await next_link.click()
+                await page.wait_for_load_state("networkidle")
+                page_num += 1
+
+            except Exception as e:
+                print("Pagination error: " + str(e))
+                break
+
+        await browser.close()
+
+    return all_rfps
+
+
 def run():
     print("Starting WEBS scraper at " + str(datetime.now()))
     supabase = get_supabase_client()
-    session = requests.Session()
     all_rfps = []
     total_new = 0
     error_msg = None
 
     try:
-        for page in range(1, 20):
-            print("Scraping page " + str(page) + "...")
-            rfps = scrape_webs_page(session, page)
+        all_rfps = asyncio.run(scrape_all_pages())
+        print("Total RFPs scraped: " + str(len(all_rfps)))
 
-            if not rfps:
-                print("No RFPs found on page " + str(page) + ", stopping")
-                break
+        for rfp in all_rfps:
+            rfp["fingerprint"] = generate_fingerprint(
+                rfp.get("title", ""),
+                rfp.get("agency", rfp.get("source_name", "")),
+                rfp.get("due_date", "")
+            )
 
-            for rfp in rfps:
-                rfp["fingerprint"] = generate_fingerprint(
-                    rfp.get("title", ""),
-                    rfp.get("agency", rfp.get("source_name", "")),
-                    rfp.get("due_date", "")
-                )
-            all_rfps.extend(rfps)
-            print("Found " + str(len(rfps)) + " RFPs on page " + str(page))
-
-            if len(rfps) < 20:
-                break
-
-        print("Total RFPs scraped before dedup: " + str(len(all_rfps)))
         all_rfps = deduplicate(all_rfps)
-        print("Total RFPs after dedup: " + str(len(all_rfps)))
+        print("Total after dedup: " + str(len(all_rfps)))
 
         if all_rfps:
             batch_size = 50
