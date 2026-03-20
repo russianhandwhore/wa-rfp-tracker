@@ -2,10 +2,8 @@ name: Daily RFP Scraper
 
 on:
   schedule:
-    # Runs every day at 7am Pacific (2pm UTC)
     - cron: '0 14 * * *'
   workflow_dispatch:
-    # Also allows manual trigger from GitHub UI
 
 jobs:
   scrape:
@@ -21,35 +19,13 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          cd scrapers
-          pip install -r requirements.txt
+        run: pip install -r scrapers/requirements.txt
 
       - name: Install Playwright browsers
-        run: |
-          playwright install chromium
+        run: playwright install chromium
 
       - name: Run WEBS scraper
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: |
-          cd scrapers
-          python scrape_webs.py
-```
-
-Commit that file too.
-
----
-
-Once all four files are committed your repo should look like this:
-```
-wa-rfp-tracker/
-├── .github/
-│   └── workflows/
-│       └── scrape.yml
-├── scrapers/
-│   ├── requirements.txt
-│   ├── utils.py
-│   └── scrape_webs.py
-└── README.md
+        run: python scrapers/scrape_webs.py
