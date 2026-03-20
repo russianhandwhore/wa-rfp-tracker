@@ -20,15 +20,6 @@ def parse_due_date(date_str):
         return None
 
 
-def get_existing_fingerprints(supabase):
-    try:
-        result = supabase.table("rfps").select("fingerprint").eq("source_platform", "WEBS").execute()
-        return set(row["fingerprint"] for row in result.data)
-    except Exception as e:
-        print("Error fetching existing fingerprints: " + str(e))
-        return set()
-
-
 def scrape_webs_page(session, page_num):
     rfps = []
     try:
@@ -108,16 +99,11 @@ def run():
     print("Starting WEBS scraper at " + str(datetime.now()))
     supabase = get_supabase_client()
     session = requests.Session()
-    all_new_rfps = []
+    all_rfps = []
     total_new = 0
-    total_updated = 0
     error_msg = None
 
     try:
-        print("Loading existing fingerprints from database...")
-        existing_fingerprints = get_existing_fingerprints(supabase)
-        print("Found " + str(len(existing_fingerprints)) + " existing RFPs in database")
-
         for page in range(1, 20):
             print("Scraping page " + str(page) + "...")
             rfps = scrape_webs_page(session, page)
@@ -126,40 +112,30 @@ def run():
                 print("No RFPs found on page " + str(page) + ", stopping")
                 break
 
-            new_on_page = 0
             for rfp in rfps:
                 rfp["fingerprint"] = generate_fingerprint(
                     rfp.get("title", ""),
                     rfp.get("agency", rfp.get("source_name", "")),
                     rfp.get("due_date", "")
                 )
-                if rfp["fingerprint"] not in existing_fingerprints:
-                    all_new_rfps.append(rfp)
-                    new_on_page += 1
-
-            print("Found " + str(new_on_page) + " new RFPs on page " + str(page))
-
-            if new_on_page == 0:
-                print("No new RFPs on this page, stopping early")
-                break
+            all_rfps.extend(rfps)
+            print("Found " + str(len(rfps)) + " RFPs on page " + str(page))
 
             if len(rfps) < 20:
                 break
 
-        print("Total new RFPs to save: " + str(len(all_new_rfps)))
+        print("Total RFPs scraped: " + str(len(all_rfps)))
 
-        if all_new_rfps:
+        if all_rfps:
             batch_size = 100
-            for i in range(0, len(all_new_rfps), batch_size):
-                batch = all_new_rfps[i:i + batch_size]
-                supabase.table("rfps").insert(batch).execute()
+            for i in range(0, len(all_rfps), batch_size):
+                batch = all_rfps[i:i + batch_size]
+                supabase.table("rfps").upsert(batch, on_conflict="fingerprint").execute()
                 total_new += len(batch)
                 print("Saved batch of " + str(len(batch)) + " RFPs")
-        else:
-            print("No new RFPs to save today")
 
         status = "success"
-        print("Done! " + str(total_new) + " new RFPs saved")
+        print("Done! " + str(total_new) + " RFPs saved")
 
     except Exception as e:
         error_msg = str(e)
@@ -171,9 +147,9 @@ def run():
             supabase=supabase,
             source_name=SOURCE_NAME,
             status=status,
-            rfps_found=len(all_new_rfps),
+            rfps_found=len(all_rfps),
             rfps_new=total_new,
-            rfps_updated=total_updated,
+            rfps_updated=0,
             error_message=error_msg
         )
 
