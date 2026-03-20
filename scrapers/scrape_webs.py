@@ -97,6 +97,32 @@ def deduplicate(rfps):
     return list(seen.values())
 
 
+async def get_pagination_links(page):
+    from bs4 import BeautifulSoup
+    html = await page.content()
+    soup = BeautifulSoup(html, "lxml")
+    pagination_row = soup.find("td", {"align": "center"})
+    if not pagination_row:
+        return []
+    links = pagination_row.find_all("a")
+    return [a.get_text().strip() for a in links]
+
+
+async def click_page(page, page_num):
+    try:
+        links = await page.query_selector_all("td[align='center'] a")
+        for link in links:
+            text = await link.inner_text()
+            if text.strip() == str(page_num):
+                await link.click()
+                await page.wait_for_selector("#DataGrid1", timeout=30000)
+                return True
+        return False
+    except Exception as e:
+        print("Error clicking page " + str(page_num) + ": " + str(e))
+        return False
+
+
 async def scrape_all_pages():
     all_rfps = []
     async with async_playwright() as p:
@@ -106,43 +132,53 @@ async def scrape_all_pages():
         print("Loading WEBS bid calendar...")
         try:
             await page.goto(BASE_URL, timeout=60000, wait_until="domcontentloaded")
-            print("Page loaded, waiting for grid...")
             await page.wait_for_selector("#DataGrid1", timeout=30000)
-            print("Grid found!")
+            print("Page loaded successfully!")
         except Exception as e:
             print("Error loading initial page: " + str(e))
             await browser.close()
             return all_rfps
 
-        page_num = 1
-        while True:
-            print("Scraping page " + str(page_num) + "...")
+        current_page = 1
+        max_pages = 25
+
+        while current_page <= max_pages:
+            print("Scraping page " + str(current_page) + "...")
             html = await page.content()
             rfps = parse_rfps_from_html(html)
-            print("Found " + str(len(rfps)) + " RFPs on page " + str(page_num))
+            print("Found " + str(len(rfps)) + " RFPs on page " + str(current_page))
+
+            if not rfps:
+                print("No RFPs found, stopping")
+                break
+
             all_rfps.extend(rfps)
 
-            try:
-                next_link = None
-                next_buttons = await page.query_selector_all("td[align='center'] a")
-                for btn in next_buttons:
-                    text = await btn.inner_text()
-                    if text.strip() == str(page_num + 1):
-                        next_link = btn
-                        break
+            next_page = current_page + 1
+            clicked = await click_page(page, next_page)
 
-                if not next_link:
-                    print("No more pages, stopping at page " + str(page_num))
+            if not clicked:
+                print("Page " + str(next_page) + " button not visible, looking for next group...")
+                try:
+                    links = await page.query_selector_all("td[align='center'] a")
+                    found_next_group = False
+                    for link in links:
+                        text = await link.inner_text()
+                        if text.strip() == "...":
+                            print("Clicking ... to load next page group")
+                            await link.click()
+                            await page.wait_for_selector("#DataGrid1", timeout=30000)
+                            clicked = await click_page(page, next_page)
+                            found_next_group = True
+                            break
+                    if not found_next_group or not clicked:
+                        print("No more pages available, done at page " + str(current_page))
+                        break
+                except Exception as e:
+                    print("Error finding next page group: " + str(e))
                     break
 
-                print("Clicking next page " + str(page_num + 1) + "...")
-                await next_link.click()
-                await page.wait_for_selector("#DataGrid1", timeout=30000)
-                page_num += 1
-
-            except Exception as e:
-                print("Pagination stopped: " + str(e))
-                break
+            current_page += 1
 
         await browser.close()
 
