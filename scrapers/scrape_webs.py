@@ -97,20 +97,6 @@ def deduplicate(rfps):
     return list(seen.values())
 
 
-def debug_pagination(html, current_page):
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(html, "lxml")
-    pagination = soup.find("td", {"align": "center"})
-    if not pagination:
-        print("DEBUG: No pagination td found at all")
-        return
-    print("DEBUG page " + str(current_page) + " pagination links:")
-    for a in pagination.find_all("a"):
-        text = a.get_text().strip()
-        href = a.get("href", "")
-        print("  Link text: [" + text + "] href: " + href[:80])
-
-
 def get_next_page_control(html, next_page_num):
     from bs4 import BeautifulSoup
     soup = BeautifulSoup(html, "lxml")
@@ -118,22 +104,11 @@ def get_next_page_control(html, next_page_num):
     if not pagination:
         return None
 
-    all_links = pagination.find_all("a")
-
-    for a in all_links:
+    for a in pagination.find_all("a"):
         if a.get_text().strip() == str(next_page_num):
             href = a.get("href", "")
             match = re.search(r"__doPostBack\('([^']+)'", href)
             if match:
-                return match.group(1)
-
-    for a in all_links:
-        text = a.get_text().strip()
-        if text in ["...", ">", "»", "Next"]:
-            href = a.get("href", "")
-            match = re.search(r"__doPostBack\('([^']+)'", href)
-            if match:
-                print("Clicking next group button: [" + text + "]")
                 return match.group(1)
 
     return None
@@ -172,12 +147,10 @@ async def scrape_all_pages():
 
             all_rfps.extend(rfps)
 
-            debug_pagination(html, page_num)
-
             control_id = get_next_page_control(html, page_num + 1)
 
             if not control_id:
-                print("No next page button found, done at page " + str(page_num))
+                print("No next page, done at page " + str(page_num))
                 break
 
             print("Going to page " + str(page_num + 1) + "...")
