@@ -103,12 +103,23 @@ def get_next_page_control(html, next_page_num):
     pagination = soup.find("td", {"align": "center"})
     if not pagination:
         return None
+
     for a in pagination.find_all("a"):
         if a.get_text().strip() == str(next_page_num):
             href = a.get("href", "")
             match = re.search(r"__doPostBack\('([^']+)'", href)
             if match:
                 return match.group(1)
+
+    for a in pagination.find_all("a"):
+        text = a.get_text().strip()
+        if text == "..." or text == ">" or text == "":
+            href = a.get("href", "")
+            match = re.search(r"__doPostBack\('([^']+)'", href)
+            if match:
+                print("Clicking ... to load next page group")
+                return match.group(1)
+
     return None
 
 
