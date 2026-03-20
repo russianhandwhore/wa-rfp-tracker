@@ -6,5 +6,4 @@ lxml==4.9.3
 playwright==1.40.0
 pandas==2.1.4
 openpyxl==3.1.2
-hashlib2==1.0.0
 schedule==1.2.1
