@@ -4,13 +4,14 @@ from datetime import datetime
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from utils import get_supabase_client, generate_fingerprint, save_rfp, log_scrape, clean_text
+from utils import get_supabase_client, generate_fingerprint, log_scrape, clean_text
 import re
 
 BASE_URL = "https://pr-webs-vendor.des.wa.gov/BidCalendar.aspx"
 SOURCE_NAME = "WEBS - Washington Electronic Business Solution"
 
-def parse_due_date(date_str: str):
+
+def parse_due_date(date_str):
     if not date_str:
         return None
     try:
@@ -18,7 +19,17 @@ def parse_due_date(date_str: str):
     except:
         return None
 
-def scrape_webs_page(session, page_num: int = 1) -> list:
+
+def get_existing_fingerprints(supabase):
+    try:
+        result = supabase.table("rfps").select("fingerprint").eq("source_platform", "WEBS").execute()
+        return set(row["fingerprint"] for row in result.data)
+    except Exception as e:
+        print("Error fetching existing fingerprints: " + str(e))
+        return set()
+
+
+def scrape_webs_page(session, page_num):
     rfps = []
     try:
         response = session.get(BASE_URL, headers={
@@ -69,6 +80,7 @@ def scrape_webs_page(session, page_num: int = 1) -> list:
                     "due_date": close_date,
                     "source_name": SOURCE_NAME,
                     "source_platform": "WEBS",
+                    "source_url": BASE_URL,
                     "status": "active",
                     "agency": None,
                     "description": None,
@@ -80,7 +92,6 @@ def scrape_webs_page(session, page_num: int = 1) -> list:
                 if text and not text.startswith("Additional") and not text.startswith("Includes"):
                     if not current_rfp.get("description"):
                         current_rfp["description"] = text
-
                 if "Includes an Inclusion Plan: Y" in str(row):
                     current_rfp["includes_inclusion_plan"] = True
 
@@ -88,66 +99,84 @@ def scrape_webs_page(session, page_num: int = 1) -> list:
             rfps.append(current_rfp)
 
     except Exception as e:
-        print(f"Error scraping WEBS page {page_num}: {e}")
+        print("Error scraping WEBS page " + str(page_num) + ": " + str(e))
 
     return rfps
 
+
 def run():
-    print(f"Starting WEBS scraper at {datetime.now()}")
+    print("Starting WEBS scraper at " + str(datetime.now()))
     supabase = get_supabase_client()
     session = requests.Session()
-    all_rfps = []
+    all_new_rfps = []
     total_new = 0
     total_updated = 0
     error_msg = None
 
     try:
+        print("Loading existing fingerprints from database...")
+        existing_fingerprints = get_existing_fingerprints(supabase)
+        print("Found " + str(len(existing_fingerprints)) + " existing RFPs in database")
+
         for page in range(1, 20):
-            print(f"Scraping page {page}...")
+            print("Scraping page " + str(page) + "...")
             rfps = scrape_webs_page(session, page)
 
             if not rfps:
-                print(f"No RFPs found on page {page}, stopping")
+                print("No RFPs found on page " + str(page) + ", stopping")
                 break
 
-            all_rfps.extend(rfps)
-            print(f"Found {len(rfps)} RFPs on page {page}")
+            new_on_page = 0
+            for rfp in rfps:
+                rfp["fingerprint"] = generate_fingerprint(
+                    rfp.get("title", ""),
+                    rfp.get("agency", rfp.get("source_name", "")),
+                    rfp.get("due_date", "")
+                )
+                if rfp["fingerprint"] not in existing_fingerprints:
+                    all_new_rfps.append(rfp)
+                    new_on_page += 1
+
+            print("Found " + str(new_on_page) + " new RFPs on page " + str(page))
+
+            if new_on_page == 0:
+                print("No new RFPs on this page, stopping early")
+                break
 
             if len(rfps) < 20:
                 break
 
-        print(f"Total RFPs scraped: {len(all_rfps)}")
+        print("Total new RFPs to save: " + str(len(all_new_rfps)))
 
-        for rfp in all_rfps:
-            rfp["fingerprint"] = generate_fingerprint(
-                rfp.get("title", ""),
-                rfp.get("agency", rfp.get("source_name", "")),
-                rfp.get("due_date", "")
-            )
-            rfp["source_url"] = BASE_URL
-
-            result = save_rfp(supabase, rfp)
-            total_new += result["new"]
-            total_updated += result["updated"]
+        if all_new_rfps:
+            batch_size = 100
+            for i in range(0, len(all_new_rfps), batch_size):
+                batch = all_new_rfps[i:i + batch_size]
+                supabase.table("rfps").insert(batch).execute()
+                total_new += len(batch)
+                print("Saved batch of " + str(len(batch)) + " RFPs")
+        else:
+            print("No new RFPs to save today")
 
         status = "success"
-        print(f"Done! {total_new} new, {total_updated} updated")
+        print("Done! " + str(total_new) + " new RFPs saved")
 
     except Exception as e:
         error_msg = str(e)
         status = "failed"
-        print(f"Scraper failed: {e}")
+        print("Scraper failed: " + str(e))
 
     finally:
         log_scrape(
             supabase=supabase,
             source_name=SOURCE_NAME,
             status=status,
-            rfps_found=len(all_rfps),
+            rfps_found=len(all_new_rfps),
             rfps_new=total_new,
             rfps_updated=total_updated,
             error_message=error_msg
         )
+
 
 if __name__ == "__main__":
     run()
