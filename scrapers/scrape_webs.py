@@ -26,6 +26,7 @@ def parse_rfps_from_html(html):
     soup = BeautifulSoup(html, "lxml")
     grid = soup.find("table", {"id": "DataGrid1"})
     if not grid:
+        print("DataGrid1 not found in HTML")
         return rfps
 
     rows = grid.find_all("tr")
@@ -101,9 +102,17 @@ async def scrape_all_pages():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
+
         print("Loading WEBS bid calendar...")
-        await page.goto(BASE_URL, timeout=60000)
-        await page.wait_for_load_state("networkidle")
+        try:
+            await page.goto(BASE_URL, timeout=60000, wait_until="domcontentloaded")
+            print("Page loaded, waiting for grid...")
+            await page.wait_for_selector("#DataGrid1", timeout=30000)
+            print("Grid found!")
+        except Exception as e:
+            print("Error loading initial page: " + str(e))
+            await browser.close()
+            return all_rfps
 
         page_num = 1
         while True:
@@ -114,26 +123,25 @@ async def scrape_all_pages():
             all_rfps.extend(rfps)
 
             try:
-                next_link = await page.query_selector("a[href*=\"__doPostBack\"][href*=\"_ctl29\"]")
-                if not next_link:
-                    next_buttons = await page.query_selector_all("td[align='center'] a")
-                    next_link = None
-                    for btn in next_buttons:
-                        text = await btn.inner_text()
-                        if text.strip() == str(page_num + 1):
-                            next_link = btn
-                            break
+                next_link = None
+                next_buttons = await page.query_selector_all("td[align='center'] a")
+                for btn in next_buttons:
+                    text = await btn.inner_text()
+                    if text.strip() == str(page_num + 1):
+                        next_link = btn
+                        break
 
                 if not next_link:
-                    print("No more pages found, stopping at page " + str(page_num))
+                    print("No more pages, stopping at page " + str(page_num))
                     break
 
+                print("Clicking next page " + str(page_num + 1) + "...")
                 await next_link.click()
-                await page.wait_for_load_state("networkidle")
+                await page.wait_for_selector("#DataGrid1", timeout=30000)
                 page_num += 1
 
             except Exception as e:
-                print("Pagination error: " + str(e))
+                print("Pagination stopped: " + str(e))
                 break
 
         await browser.close()
