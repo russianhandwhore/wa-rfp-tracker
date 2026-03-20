@@ -97,11 +97,27 @@ def deduplicate(rfps):
     return list(seen.values())
 
 
+def get_next_page_control(html, next_page_num):
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+    pagination = soup.find("td", {"align": "center"})
+    if not pagination:
+        return None
+    for a in pagination.find_all("a"):
+        if a.get_text().strip() == str(next_page_num):
+            href = a.get("href", "")
+            match = re.search(r"__doPostBack\('([^']+)'", href)
+            if match:
+                return match.group(1)
+    return None
+
+
 async def scrape_all_pages():
     all_rfps = []
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
+        context = await browser.new_context()
+        page = await context.new_page()
 
         print("Loading WEBS bid calendar...")
         try:
@@ -118,6 +134,7 @@ async def scrape_all_pages():
 
         while page_num <= max_pages:
             print("Scraping page " + str(page_num) + "...")
+            await asyncio.sleep(1)
             html = await page.content()
             rfps = parse_rfps_from_html(html)
             print("Found " + str(len(rfps)) + " RFPs on page " + str(page_num))
@@ -128,52 +145,24 @@ async def scrape_all_pages():
 
             all_rfps.extend(rfps)
 
+            control_id = get_next_page_control(html, page_num + 1)
+
+            if not control_id:
+                print("No next page button found, done at page " + str(page_num))
+                break
+
+            print("Going to page " + str(page_num + 1) + "...")
+
             try:
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(html, "lxml")
-                pagination = soup.find("td", {"align": "center"})
+                async with page.expect_navigation(wait_until="domcontentloaded", timeout=30000):
+                    await page.evaluate("__doPostBack('" + control_id + "', '')")
 
-                if not pagination:
-                    print("No pagination found, this is the last page")
-                    break
-
-                next_link = None
-                for a in pagination.find_all("a"):
-                    if a.get_text().strip() == str(page_num + 1):
-                        next_link = a
-                        break
-
-                if not next_link:
-                    print("No link for page " + str(page_num + 1) + ", done")
-                    break
-
-                href = next_link.get("href", "")
-                postback_match = re.search(r"__doPostBack\('([^']+)'", href)
-                if not postback_match:
-                    print("Could not parse postback from: " + href)
-                    break
-
-                control_id = postback_match.group(1)
-                print("Navigating to page " + str(page_num + 1) + " via " + control_id)
-
-                first_title_before = rfps[0]["title"] if rfps else ""
-
-                await page.evaluate("__doPostBack('" + control_id + "', '')")
-                await page.wait_for_load_state("domcontentloaded")
-                await asyncio.sleep(2)
-
-                new_html = await page.content()
-                new_rfps = parse_rfps_from_html(new_html)
-                first_title_after = new_rfps[0]["title"] if new_rfps else ""
-
-                if first_title_before == first_title_after and page_num > 1:
-                    print("Page did not change, stopping")
-                    break
-
+                await page.wait_for_selector("#DataGrid1", timeout=30000)
+                await asyncio.sleep(1)
                 page_num += 1
 
             except Exception as e:
-                print("Pagination error on page " + str(page_num) + ": " + str(e))
+                print("Navigation error: " + str(e))
                 break
 
         await browser.close()
