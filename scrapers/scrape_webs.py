@@ -11,6 +11,53 @@ from bs4 import BeautifulSoup
 BASE_URL = "https://pr-webs-vendor.des.wa.gov/BidCalendar.aspx"
 SOURCE_NAME = "WEBS - Washington Electronic Business Solution"
 
+# WA state agency codes found in ref numbers -> full agency names
+AGENCY_CODES = {
+    "DCYF": "Dept. of Children, Youth & Families",
+    "DNR": "Dept. of Natural Resources",
+    "WDFW": "WA Dept. of Fish & Wildlife",
+    "WSDOT": "WA State DOT",
+    "DOT": "WA State DOT",
+    "DSHS": "Dept. of Social & Health Services",
+    "DOC": "Dept. of Corrections",
+    "DOH": "Dept. of Health",
+    "OFM": "Office of Financial Management",
+    "AGR": "Dept. of Agriculture",
+    "ECY": "Dept. of Ecology",
+    "LNI": "Dept. of Labor & Industries",
+    "L&I": "Dept. of Labor & Industries",
+    "DES": "Dept. of Enterprise Services",
+    "WSP": "WA State Patrol",
+    "DOL": "Dept. of Licensing",
+    "DVA": "Dept. of Veterans Affairs",
+    "DFW": "WA Dept. of Fish & Wildlife",
+    "HCA": "Health Care Authority",
+    "HHSB": "Health Care Authority",
+    "OAH": "Office of Administrative Hearings",
+    "OSPI": "Office of Superintendent of Public Instruction",
+    "SOS": "Office of Secretary of State",
+    "LEG": "WA State Legislature",
+    "ATG": "Office of Attorney General",
+    "OAG": "Office of Attorney General",
+    "LCB": "Liquor & Cannabis Board",
+    "UTC": "Utilities & Transportation Commission",
+    "WSSDA": "WA State School Directors Association",
+    "WSAC": "Student Achievement Council",
+    "SBA": "State Board for Community & Technical Colleges",
+    "SBCTC": "State Board for Community & Technical Colleges",
+    "WDVA": "Dept. of Veterans Affairs",
+    "PW": "Dept. of Public Works",
+    "COM": "Dept. of Commerce",
+    "RCO": "Recreation & Conservation Office",
+    "ESD": "Employment Security Dept.",
+    "CTED": "Dept. of Commerce",
+    "ISB": "Information Services Board",
+    "WaTech": "WA Technology Solutions",
+    "SGC": "State Gaming Commission",
+    "WSGC": "WA State Gambling Commission",
+    "WSIPP": "WA State Institute for Public Policy",
+}
+
 
 def parse_due_date(date_str):
     if not date_str:
@@ -19,6 +66,41 @@ def parse_due_date(date_str):
         return datetime.strptime(date_str.strip(), "%m/%d/%y").isoformat()
     except:
         return None
+
+
+def extract_agency_from_ref(ref_number):
+    """Try to match a known agency code from the ref number."""
+    if not ref_number:
+        return None
+    ref_upper = ref_number.upper()
+    # Try longest match first
+    for code in sorted(AGENCY_CODES.keys(), key=len, reverse=True):
+        if code in ref_upper:
+            return AGENCY_CODES[code]
+    return None
+
+
+def extract_agency_from_description(description):
+    """Try to extract agency name from description text."""
+    if not description:
+        return None
+    # Pattern: "Washington State Department of ..."
+    match = re.search(
+        r'Washington\s+State\s+(Department\s+of\s+[\w\s&]+?)(?:\s*[,\.\(]|$)',
+        description, re.IGNORECASE
+    )
+    if match:
+        return "WA " + match.group(1).strip()
+    # Pattern: "Department of ..."
+    match = re.search(
+        r'\b(Department\s+of\s+[\w\s&]{3,40}?)(?:\s*[,\.\("]|hereafter|$)',
+        description, re.IGNORECASE
+    )
+    if match:
+        name = match.group(1).strip()
+        if len(name) < 60:
+            return name
+    return None
 
 
 def parse_rfps_from_html(html):
@@ -52,7 +134,18 @@ def parse_rfps_from_html(html):
 
             cell_texts = [clean_text(c.get_text()) for c in cells]
             close_date = parse_due_date(cell_texts[0]) if cell_texts else None
-            contact = cell_texts[-1] if len(cell_texts) >= 2 else None
+
+            # WEBS has 4 cols: Close Date | Title+Ref | Contact | Additional Data
+            # Contact is second-to-last, "Additional Data" is last
+            contact = None
+            if len(cell_texts) >= 3:
+                candidate = cell_texts[-2]
+                if candidate and "Additional" not in candidate and len(candidate) > 2:
+                    contact = candidate
+            if not contact and len(cell_texts) >= 2:
+                candidate = cell_texts[-1]
+                if candidate and "Additional" not in candidate and len(candidate) > 2:
+                    contact = candidate
 
             current_rfp = {
                 "title": title,
@@ -60,7 +153,7 @@ def parse_rfps_from_html(html):
                 "ref_number": ref_number,
                 "contact_name": contact,
                 "due_date": close_date,
-                "agency": None,
+                "agency": extract_agency_from_ref(ref_number),
                 "source_name": SOURCE_NAME,
                 "source_platform": "WEBS",
                 "source_url": BASE_URL,
@@ -79,32 +172,6 @@ def parse_rfps_from_html(html):
 
             if not row_text:
                 continue
-
-            # Look for agency label in bold tags
-            bold = row.find("b")
-            if bold:
-                bold_text = clean_text(bold.get_text())
-                if re.search(r'Agency|Department|Organization', bold_text, re.IGNORECASE):
-                    sibling = bold.find_next_sibling(string=True)
-                    if sibling:
-                        val = clean_text(str(sibling))
-                        if val and len(val) > 2:
-                            current_rfp["agency"] = val
-                            continue
-                    full = clean_text(row.get_text())
-                    val = re.sub(r'^(Issuing\s+)?(Agency|Department|Organization)\s*[:\-]?\s*', '', full, flags=re.IGNORECASE).strip()
-                    if val and len(val) > 2:
-                        current_rfp["agency"] = val
-                        continue
-
-            # Check for "Agency:" pattern in row text
-            agency_match = re.search(r'(?:Issuing\s+)?Agency\s*[:\-]\s*(.+?)(?:\s{2,}|$)', row_text, re.IGNORECASE)
-            if agency_match:
-                val = agency_match.group(1).strip()
-                if val and len(val) > 2:
-                    current_rfp["agency"] = val
-                    continue
-
             if "Includes an Inclusion Plan" in row_text:
                 continue
             if "Additional Data" in row_text:
@@ -114,7 +181,7 @@ def parse_rfps_from_html(html):
             if "Deadline for Submitting" in row_text:
                 continue
             if row_text.startswith("Selective"):
-                continue
+                row_text = row_text[len("Selective"):].strip()
 
             if len(row_text) > 20:
                 current_rfp["description_lines"].append(row_text)
@@ -134,6 +201,10 @@ def parse_rfps_from_html(html):
             rfp["description"] = full_desc
         else:
             rfp["description"] = None
+
+        # If agency not found from ref, try description
+        if not rfp.get("agency") and rfp.get("description"):
+            rfp["agency"] = extract_agency_from_description(rfp["description"])
 
     return rfps
 
@@ -180,17 +251,6 @@ async def scrape_all_pages():
             await browser.close()
             return all_rfps
 
-        # DEBUG: dump first RFP's raw HTML so we can see exact structure
-        html = await page.content()
-        soup = BeautifulSoup(html, "lxml")
-        grid = soup.find("table", {"id": "DataGrid1"})
-        if grid:
-            rows = grid.find_all("tr")
-            print("=== DEBUG: First 15 rows of DataGrid1 ===")
-            for i, row in enumerate(rows[:15]):
-                print("Row " + str(i) + ": " + row.get_text()[:120].replace("\n", " ").replace("\r", ""))
-            print("=== END DEBUG ===")
-
         page_num = 1
         max_pages = 25
 
@@ -204,6 +264,7 @@ async def scrape_all_pages():
             if rfps:
                 sample = rfps[0]
                 print("  title:   " + str(sample.get("title", ""))[:60])
+                print("  ref:     " + str(sample.get("ref_number")))
                 print("  agency:  " + str(sample.get("agency")))
                 print("  contact: " + str(sample.get("contact_name")))
 
