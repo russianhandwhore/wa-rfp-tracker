@@ -2,7 +2,7 @@ name: Daily RFP Scraper
 
 on:
   schedule:
-    - cron: '0 14 * * *'
+    - cron: '0 14 * * *'   # 7am Pacific (UTC-7)
   workflow_dispatch:
 
 jobs:
@@ -10,11 +10,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
@@ -29,3 +27,15 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python scrapers/scrape_webs.py
+
+      - name: Run OpenGov scraper (Seattle + Pierce County)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scrapers/scrape_opengov.py
+
+      - name: Run Procureware scraper (Spokane + Snohomish + Community Transit)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scrapers/scrape_procureware.py
