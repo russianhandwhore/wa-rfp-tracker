@@ -51,21 +51,8 @@ def parse_rfps_from_html(html):
                 ref_number = clean_text(ref_span.find_next_sibling(string=True))
 
             cell_texts = [clean_text(c.get_text()) for c in cells]
-
-            # WEBS column order: Close Date | Ref# | Title/Link | Agency | Contact
             close_date = parse_due_date(cell_texts[0]) if cell_texts else None
             contact = cell_texts[-1] if len(cell_texts) >= 2 else None
-
-            # Agency is the second-to-last cell (before contact)
-            agency = None
-            if len(cell_texts) >= 3:
-                agency = cell_texts[-2]
-                # Sanity check — agency shouldn't look like a date or ref number
-                if agency and (re.match(r'^\d{1,2}/\d{1,2}/\d{2,4}$', agency) or agency.startswith("Ref")):
-                    agency = None
-                # Clean up common non-agency values
-                if agency and len(agency) < 3:
-                    agency = None
 
             current_rfp = {
                 "title": title,
@@ -73,7 +60,7 @@ def parse_rfps_from_html(html):
                 "ref_number": ref_number,
                 "contact_name": contact,
                 "due_date": close_date,
-                "agency": agency,
+                "agency": None,
                 "source_name": SOURCE_NAME,
                 "source_platform": "WEBS",
                 "source_url": BASE_URL,
@@ -92,6 +79,32 @@ def parse_rfps_from_html(html):
 
             if not row_text:
                 continue
+
+            # Look for agency label in bold tags
+            bold = row.find("b")
+            if bold:
+                bold_text = clean_text(bold.get_text())
+                if re.search(r'Agency|Department|Organization', bold_text, re.IGNORECASE):
+                    sibling = bold.find_next_sibling(string=True)
+                    if sibling:
+                        val = clean_text(str(sibling))
+                        if val and len(val) > 2:
+                            current_rfp["agency"] = val
+                            continue
+                    full = clean_text(row.get_text())
+                    val = re.sub(r'^(Issuing\s+)?(Agency|Department|Organization)\s*[:\-]?\s*', '', full, flags=re.IGNORECASE).strip()
+                    if val and len(val) > 2:
+                        current_rfp["agency"] = val
+                        continue
+
+            # Check for "Agency:" pattern in row text
+            agency_match = re.search(r'(?:Issuing\s+)?Agency\s*[:\-]\s*(.+?)(?:\s{2,}|$)', row_text, re.IGNORECASE)
+            if agency_match:
+                val = agency_match.group(1).strip()
+                if val and len(val) > 2:
+                    current_rfp["agency"] = val
+                    continue
+
             if "Includes an Inclusion Plan" in row_text:
                 continue
             if "Additional Data" in row_text:
@@ -167,6 +180,17 @@ async def scrape_all_pages():
             await browser.close()
             return all_rfps
 
+        # DEBUG: dump first RFP's raw HTML so we can see exact structure
+        html = await page.content()
+        soup = BeautifulSoup(html, "lxml")
+        grid = soup.find("table", {"id": "DataGrid1"})
+        if grid:
+            rows = grid.find_all("tr")
+            print("=== DEBUG: First 15 rows of DataGrid1 ===")
+            for i, row in enumerate(rows[:15]):
+                print("Row " + str(i) + ": " + row.get_text()[:120].replace("\n", " ").replace("\r", ""))
+            print("=== END DEBUG ===")
+
         page_num = 1
         max_pages = 25
 
@@ -177,32 +201,29 @@ async def scrape_all_pages():
             rfps = parse_rfps_from_html(html)
             print("Found " + str(len(rfps)) + " RFPs on page " + str(page_num))
 
-            # Debug: print first RFP agency on each page
             if rfps:
-                print("Sample agency: " + str(rfps[0].get("agency")))
+                sample = rfps[0]
+                print("  title:   " + str(sample.get("title", ""))[:60])
+                print("  agency:  " + str(sample.get("agency")))
+                print("  contact: " + str(sample.get("contact_name")))
 
             if not rfps:
-                print("No RFPs found, stopping")
                 break
 
             all_rfps.extend(rfps)
 
             control_id = get_next_page_control(html, page_num + 1)
-
             if not control_id:
                 print("No next page, done at page " + str(page_num))
                 break
 
             print("Going to page " + str(page_num + 1) + "...")
-
             try:
                 async with page.expect_navigation(wait_until="domcontentloaded", timeout=30000):
                     await page.evaluate("__doPostBack('" + control_id + "', '')")
-
                 await page.wait_for_selector("#DataGrid1", timeout=30000)
                 await asyncio.sleep(1)
                 page_num += 1
-
             except Exception as e:
                 print("Navigation error: " + str(e))
                 break
@@ -234,7 +255,7 @@ def run():
         print("Total after dedup: " + str(len(all_rfps)))
 
         has_agency = sum(1 for r in all_rfps if r.get("agency"))
-        print("RFPs with agency: " + str(has_agency))
+        print("RFPs with agency: " + str(has_agency) + " / " + str(len(all_rfps)))
 
         if all_rfps:
             batch_size = 50
