@@ -7,6 +7,7 @@ const supabase = createClient(
 )
 
 const PLATFORMS = ['All', 'WEBS', 'OpenGov', 'Procureware', 'PublicPurchase', 'SAP_Ariba', 'Oracle', 'Bonfire', 'Workday', 'Biddingo', 'Standalone']
+const CATEGORIES = ['All', 'IT', 'Construction', 'Supplies', 'Services', 'Misc']
 const PER_PAGE = 25
 
 export default function App() {
@@ -14,6 +15,7 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [platform, setPlatform] = useState('All')
+  const [category, setCategory] = useState('All')
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
   const [showExpired, setShowExpired] = useState(false)
@@ -21,7 +23,7 @@ export default function App() {
 
   useEffect(() => {
     fetchRfps()
-  }, [search, platform, page, showExpired])
+  }, [search, platform, page, showExpired, category])
 
   async function fetchRfps() {
     setLoading(true)
@@ -40,6 +42,9 @@ export default function App() {
     }
     if (!showExpired) {
       query = query.gte('due_date', new Date().toISOString())
+    }
+    if (category !== 'All') {
+      query = query.contains('categories', [category])
     }
 
     const { data, count, error } = await query
@@ -67,6 +72,17 @@ export default function App() {
     if (days <= 3) return 'text-red-500 font-bold'
     if (days <= 7) return 'text-orange-500 font-semibold'
     return 'text-green-600'
+  }
+
+  function getCategoryColor(cat) {
+    const colors = {
+      'IT': 'bg-blue-50 text-blue-700 border-blue-200',
+      'Construction': 'bg-orange-50 text-orange-700 border-orange-200',
+      'Supplies': 'bg-green-50 text-green-700 border-green-200',
+      'Services': 'bg-purple-50 text-purple-700 border-purple-200',
+      'Misc': 'bg-gray-50 text-gray-700 border-gray-200',
+    }
+    return colors[cat] || 'bg-gray-50 text-gray-700 border-gray-200'
   }
 
   function scrollToSearch() {
@@ -193,9 +209,9 @@ export default function App() {
         </div>
       </section>
 
-      <section id="search-section" className="py-8 sticky top-16 z-40 bg-white border-b border-gray-200 shadow-sm">
+      <section id="search-section" className="py-6 sticky top-16 z-40 bg-white border-b border-gray-200 shadow-sm">
         <div className="max-w-7xl mx-auto px-4">
-          <div className="flex flex-col md:flex-row gap-3">
+          <div className="flex flex-col md:flex-row gap-3 mb-4">
             <div className="flex-1 relative">
               <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -227,6 +243,30 @@ export default function App() {
               <span className="text-sm text-gray-600 whitespace-nowrap">Show Expired</span>
             </label>
           </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-1">Category:</span>
+            {CATEGORIES.map(cat => (
+              <button
+                key={cat}
+                onClick={() => { setCategory(cat); setPage(1) }}
+                className={
+                  "px-3 py-1.5 rounded-full text-xs font-semibold border transition-all " +
+                  (category === cat
+                    ? "text-white border-transparent"
+                    : "bg-white hover:bg-gray-50 " + getCategoryColor(cat))
+                }
+                style={category === cat ? { backgroundColor: '#EE0000', borderColor: '#EE0000' } : {}}
+              >
+                {cat === 'All' ? '🔍 All Categories' :
+                 cat === 'IT' ? '💻 IT & Technology' :
+                 cat === 'Construction' ? '🏗️ Construction' :
+                 cat === 'Supplies' ? '📦 Supplies & Goods' :
+                 cat === 'Services' ? '🤝 Professional Services' :
+                 '📋 Misc'}
+              </button>
+            ))}
+          </div>
         </div>
       </section>
 
@@ -247,6 +287,7 @@ export default function App() {
             <div className="flex items-center justify-between mb-6">
               <p className="text-sm text-gray-500">
                 Showing <span className="font-semibold text-gray-900">{((page - 1) * PER_PAGE) + 1}</span> to <span className="font-semibold text-gray-900">{Math.min(page * PER_PAGE, total)}</span> of <span className="font-semibold text-gray-900">{total}</span> results
+                {category !== 'All' && <span className="ml-2 text-red-600 font-medium">in {category}</span>}
               </p>
             </div>
 
@@ -266,8 +307,17 @@ export default function App() {
                               {rfp.agency}
                             </span>
                           )}
+                          {rfp.categories && rfp.categories.map(cat => (
+                            <span key={cat} className={"text-xs font-medium px-2.5 py-1 rounded-full border " + getCategoryColor(cat)}>
+                              {cat === 'IT' ? '💻 IT' :
+                               cat === 'Construction' ? '🏗️ Construction' :
+                               cat === 'Supplies' ? '📦 Supplies' :
+                               cat === 'Services' ? '🤝 Services' :
+                               '📋 Misc'}
+                            </span>
+                          ))}
                           {rfp.includes_inclusion_plan && (
-                            <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-blue-50 text-blue-600">
+                            <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-blue-50 text-blue-600 border border-blue-200">
                               Inclusion Plan
                             </span>
                           )}
@@ -332,7 +382,7 @@ export default function App() {
                   disabled={page === 1}
                   className="px-5 py-2.5 rounded-lg border border-gray-300 text-sm font-medium disabled:opacity-40 hover:bg-gray-50 transition-colors"
                 >
-                  ← Previous
+                  Previous
                 </button>
                 <div className="flex items-center gap-1">
                   {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
