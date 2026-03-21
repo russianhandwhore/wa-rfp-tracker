@@ -114,7 +114,7 @@ export default function App() {
         ) : (
           <>
             <div className="mb-4 text-sm text-gray-500">
-              Showing {((page - 1) * PER_PAGE) + 1}–{Math.min(page * PER_PAGE, total)} of {total} results
+              Showing {((page - 1) * PER_PAGE) + 1} to {Math.min(page * PER_PAGE, total)} of {total} results
             </div>
             <div className="space-y-3">
               {rfps.map(rfp => {
@@ -127,24 +127,38 @@ export default function App() {
                           <span className="text-xs font-medium px-2 py-0.5 rounded" style={{ backgroundColor: '#FFF0F0', color: '#CC0000' }}>
                             {rfp.source_platform}
                           </span>
-                          {rfp.agency && <span className="text-xs text-gray-500">{rfp.agency}</span>}
+                          {rfp.agency && (
+                            <span className="text-xs text-gray-500">{rfp.agency}</span>
+                          )}
                           {rfp.includes_inclusion_plan && (
-                            <span className="text-xs font-medium px-2 py-0.5 rounded bg-blue-50 text-blue-600">Inclusion Plan</span>
+                            <span className="text-xs font-medium px-2 py-0.5 rounded bg-blue-50 text-blue-600">
+                              Inclusion Plan
+                            </span>
                           )}
                         </div>
-                        <h2 className="font-semibold text-gray-900 text-sm md:text-base leading-snug">{rfp.title}</h2>
+                        <h2 className="font-semibold text-gray-900 text-sm md:text-base leading-snug">
+                          {rfp.title}
+                        </h2>
                         {rfp.description && (
-                          <p className="text-gray-500 text-sm mt-1 line-clamp-2">{rfp.description}</p>
+                          <p className="text-gray-500 text-sm mt-1 line-clamp-2">
+                            {rfp.description}
+                          </p>
                         )}
                         <div className="flex items-center gap-4 mt-2 text-xs text-gray-400 flex-wrap">
-                          {rfp.ref_number && <span>Ref: {rfp.ref_number}</span>}
-                          {rfp.contact_name && <span>Contact: {rfp.contact_name}</span>}
+                          {rfp.ref_number && (
+                            <span>Ref: {rfp.ref_number}</span>
+                          )}
+                          {rfp.contact_name && (
+                            <span>Contact: {rfp.contact_name}</span>
+                          )}
                         </div>
                       </div>
                       <div className="flex flex-row md:flex-col items-center md:items-end gap-3 md:gap-1 md:min-w-32">
                         <div className="text-right">
                           <div className="text-xs text-gray-400">Due</div>
-                          <div className="text-sm font-medium text-gray-700">{formatDate(rfp.due_date)}</div>
+                          <div className="text-sm font-medium text-gray-700">
+                            {formatDate(rfp.due_date)}
+                          </div>
                           {daysLeft !== null && (
                             <div className={"text-xs " + getDaysColor(daysLeft)}>
                               {daysLeft < 0 ? 'Expired' : daysLeft === 0 ? 'Due today!' : daysLeft + ' days left'}
@@ -177,7 +191,9 @@ export default function App() {
                 >
                   Previous
                 </button>
-                <span className="text-sm text-gray-600">Page {page} of {totalPages}</span>
+                <span className="text-sm text-gray-600">
+                  Page {page} of {totalPages}
+                </span>
                 <button
                   onClick={() => setPage(p => Math.min(totalPages, p + 1))}
                   disabled={page === totalPages}
