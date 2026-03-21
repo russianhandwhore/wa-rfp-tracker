@@ -22,33 +22,31 @@ export default function App() {
   const [search, setSearch] = useState('')
   const [platform, setPlatform] = useState('All')
   const [category, setCategory] = useState('All')
-  const [sortBy, setSortBy] = useState('created_at_desc')
+  const [sortBy, setSortBy] = useState('due_date_asc')
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
   const [showExpired, setShowExpired] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [docsModal, setDocsModal] = useState(null)
   const [contactModal, setContactModal] = useState(null)
-  const [contactInfo, setContactInfo] = useState(null)
-  const [contactLoading, setContactLoading] = useState(false)
+
+  useEffect(() => { fetchRfps() }, [search, platform, page, showExpired, category, sortBy])
 
   useEffect(() => {
-    fetchRfps()
-  }, [search, platform, page, showExpired, category, sortBy])
-
-  useEffect(() => {
-    const handler = (e) => { if (e.key === 'Escape') { setDocsModal(null); setContactModal(null) } }
+    const handler = (e) => {
+      if (e.key === 'Escape') { setDocsModal(null); setContactModal(null) }
+    }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [])
 
   async function fetchRfps() {
     setLoading(true)
-
-    const [sortCol, sortDir] = sortBy === 'due_date_asc'    ? ['due_date', true]
-                              : sortBy === 'due_date_desc'   ? ['due_date', false]
-                              : sortBy === 'created_at_desc' ? ['created_at', false]
-                              :                                ['created_at', true]
+    const [sortCol, sortDir] =
+      sortBy === 'due_date_asc'    ? ['due_date', true] :
+      sortBy === 'due_date_desc'   ? ['due_date', false] :
+      sortBy === 'created_at_desc' ? ['created_at', false] :
+                                     ['created_at', true]
 
     let query = supabase
       .from('rfps')
@@ -59,12 +57,19 @@ export default function App() {
 
     if (search) query = query.ilike('title', '%' + search + '%')
     if (platform !== 'All') query = query.eq('source_platform', platform)
-    if (!showExpired) query = query.gte('due_date', new Date().toISOString())
+    if (!showExpired) {
+      const now = new Date().toISOString()
+      query = query.or('due_date.gte.' + now + ',due_date.is.null')
+    }
     if (category !== 'All') query = query.contains('categories', [category])
 
     const { data, count, error } = await query
     if (!error) {
-      setRfps(data || [])
+      // Push 100+ day items to end but preserve the server-chosen sort within each group
+      const items = data || []
+      const near = items.filter(r => { const d = getDaysLeft(r.due_date); return d !== null && d <= 100 })
+      const far  = items.filter(r => { const d = getDaysLeft(r.due_date); return d === null || d > 100 })
+      setRfps([...near, ...far])
       setTotal(count || 0)
     }
     setLoading(false)
@@ -72,9 +77,7 @@ export default function App() {
 
   function formatDate(dateStr) {
     if (!dateStr) return 'No date'
-    return new Date(dateStr).toLocaleDateString('en-US', {
-      month: 'short', day: 'numeric', year: 'numeric'
-    })
+    return new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
   }
 
   function getDaysLeft(dateStr) {
@@ -86,16 +89,18 @@ export default function App() {
     if (days === null || days < 0) return 'text-gray-400'
     if (days <= 3) return 'text-red-500 font-bold'
     if (days <= 7) return 'text-orange-500 font-semibold'
-    return 'text-green-600'
+    if (days <= 30) return 'text-green-600 font-medium'
+    if (days <= 100) return 'text-green-600'
+    return 'text-gray-400'  // 100+ days — muted, not prominent
   }
 
   function getCategoryColor(cat) {
     const colors = {
-      'IT': 'bg-blue-50 text-blue-700 border-blue-200',
-      'Construction': 'bg-orange-50 text-orange-700 border-orange-200',
-      'Supplies': 'bg-green-50 text-green-700 border-green-200',
-      'Services': 'bg-purple-50 text-purple-700 border-purple-200',
-      'Misc': 'bg-gray-50 text-gray-700 border-gray-200',
+      IT: 'bg-blue-50 text-blue-700 border-blue-200',
+      Construction: 'bg-orange-50 text-orange-700 border-orange-200',
+      Supplies: 'bg-green-50 text-green-700 border-green-200',
+      Services: 'bg-purple-50 text-purple-700 border-purple-200',
+      Misc: 'bg-gray-50 text-gray-700 border-gray-200',
     }
     return colors[cat] || 'bg-gray-50 text-gray-700 border-gray-200'
   }
@@ -112,31 +117,26 @@ export default function App() {
     setDocsModal({ title: rfp.title, detailUrl: rfp.detail_url, documents: getDocuments(rfp) })
   }
 
-  async function openContactModal(rfp) {
-    setContactModal({ name: rfp.contact_name, agency: rfp.agency || rfp.source_name })
-    setContactInfo(null)
-    setContactLoading(true)
-    try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 500,
-          messages: [{
-            role: 'user',
-            content: `Find contact information for "${rfp.contact_name}" who works in procurement at "${rfp.agency || rfp.source_name}" in Washington State. Return ONLY a JSON object with these fields (use null if unknown): { "email": "...", "phone": "...", "title": "...", "department": "...", "linkedin": "...", "notes": "..." }. No other text.`
-          }]
-        })
-      })
-      const data = await response.json()
-      const text = data.content?.[0]?.text || '{}'
-      const clean = text.replace(/\`\`\`json|\`\`\`/g, '').trim()
-      setContactInfo(JSON.parse(clean))
-    } catch (e) {
-      setContactInfo({ notes: 'Could not load contact info. Try searching manually.' })
-    }
-    setContactLoading(false)
+  function openContactModal(rfp) {
+    // Build smart search queries
+    const name = rfp.contact_name
+    const agency = rfp.agency || ''
+    const dept = rfp.department || ''
+    const location = agency || dept
+
+    // Google: "First Last Department Washington State procurement"
+    const googleQuery = [name, location, 'Washington State', 'procurement'].filter(Boolean).join(' ')
+    // LinkedIn: name + agency
+    const linkedinQuery = [name, location, 'Washington'].filter(Boolean).join(' ')
+
+    setContactModal({
+      name,
+      agency: rfp.agency || rfp.source_name,
+      department: rfp.department,
+      email: rfp.contact_email || null,
+      googleUrl: 'https://www.google.com/search?q=' + encodeURIComponent(googleQuery),
+      linkedinUrl: 'https://www.linkedin.com/search/results/people/?keywords=' + encodeURIComponent(linkedinQuery),
+    })
   }
 
   function scrollToSearch() {
@@ -154,25 +154,21 @@ export default function App() {
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-screen overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
             <div className="flex items-start justify-between p-6 border-b border-gray-100">
               <div className="flex-1 pr-4">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: '#FFF0F0', color: '#CC0000' }}>Procureware</span>
-                </div>
+                <span className="text-xs font-semibold px-2 py-0.5 rounded-full mb-2 inline-block" style={{ backgroundColor: '#FFF0F0', color: '#CC0000' }}>Procureware</span>
                 <h2 className="font-bold text-gray-900 text-base leading-snug">{docsModal.title}</h2>
               </div>
               <button onClick={() => setDocsModal(null)} className="text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0">
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
               </button>
             </div>
             <div className="overflow-y-auto flex-1 p-6">
               {docsModal.documents.length === 0 ? (
                 <div className="text-center py-8">
                   <div className="text-4xl mb-3">📂</div>
-                  <p className="text-gray-500 text-sm mb-4">No documents scraped for this bid.</p>
+                  <p className="text-gray-500 text-sm mb-4">No documents were scraped for this bid.</p>
                   {docsModal.detailUrl && (
-                    <a href={docsModal.detailUrl + '?t=BidDocuments'} target="_blank" rel="noopener noreferrer" style={{ backgroundColor: '#EE0000' }} className="inline-block text-white text-sm font-semibold px-4 py-2 rounded-lg hover:opacity-90">
-                      View on Procureware →
+                    <a href={docsModal.detailUrl + '?t=BidDocuments'} target="_blank" rel="noopener noreferrer" style={{ backgroundColor: '#EE0000' }} className="inline-block text-white text-sm font-semibold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
+                      View Documents on Procureware →
                     </a>
                   )}
                 </div>
@@ -181,15 +177,11 @@ export default function App() {
                   <p className="text-xs text-gray-400 uppercase tracking-wide font-semibold mb-3">{docsModal.documents.length} document{docsModal.documents.length !== 1 ? 's' : ''} available</p>
                   {docsModal.documents.map((doc, i) => (
                     <a key={i} href={doc.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 p-3 rounded-lg border border-gray-200 hover:border-red-300 hover:bg-red-50 transition-all group">
-                      <div className="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0 group-hover:bg-red-100">
-                        <svg className="w-4 h-4 text-gray-500 group-hover:text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                        </svg>
+                      <div className="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0 group-hover:bg-red-100 transition-colors">
+                        <svg className="w-4 h-4 text-gray-500 group-hover:text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
                       </div>
                       <span className="text-sm text-gray-700 group-hover:text-red-700 font-medium flex-1 truncate">{doc.name}</span>
-                      <svg className="w-4 h-4 text-gray-400 group-hover:text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                      </svg>
+                      <svg className="w-4 h-4 text-gray-400 group-hover:text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
                     </a>
                   ))}
                 </div>
@@ -204,76 +196,55 @@ export default function App() {
         </div>
       )}
 
-
-      {/* Contact Info Modal */}
+      {/* Contact Modal */}
       {contactModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(0,0,0,0.6)' }} onClick={() => setContactModal(null)}>
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden" onClick={e => e.stopPropagation()}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden" onClick={e => e.stopPropagation()}>
             <div className="flex items-start justify-between p-6 border-b border-gray-100">
               <div>
                 <p className="text-xs text-gray-400 uppercase tracking-wide font-semibold mb-1">Procurement Contact</p>
-                <h2 className="font-bold text-gray-900 text-lg">{contactModal.name}</h2>
-                <p className="text-sm text-gray-500 mt-0.5">{contactModal.agency}</p>
+                <h2 className="font-bold text-gray-900 text-xl">{contactModal.name}</h2>
+                {contactModal.agency && <p className="text-sm text-gray-500 mt-0.5">{contactModal.agency}</p>}
+                {contactModal.department && <p className="text-xs text-gray-400 mt-0.5">{contactModal.department}</p>}
               </div>
-              <button onClick={() => setContactModal(null)} className="text-gray-400 hover:text-gray-600 transition-colors">
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
+              <button onClick={() => setContactModal(null)} className="text-gray-400 hover:text-gray-600 transition-colors ml-4 flex-shrink-0">
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
               </button>
             </div>
             <div className="p-6">
-              {contactLoading ? (
-                <div className="text-center py-6">
-                  <div className="inline-block w-6 h-6 border-3 border-red-500 border-t-transparent rounded-full animate-spin mb-3" style={{ borderWidth: '3px' }}></div>
-                  <p className="text-sm text-gray-400">Looking up contact info...</p>
-                </div>
-              ) : contactInfo ? (
-                <div className="space-y-3">
-                  {contactInfo.title && (
-                    <div className="flex items-center gap-3">
-                      <span className="text-lg">🏢</span>
-                      <div><p className="text-xs text-gray-400">Title</p><p className="text-sm font-medium text-gray-800">{contactInfo.title}</p></div>
-                    </div>
-                  )}
-                  {contactInfo.department && (
-                    <div className="flex items-center gap-3">
-                      <span className="text-lg">📋</span>
-                      <div><p className="text-xs text-gray-400">Department</p><p className="text-sm font-medium text-gray-800">{contactInfo.department}</p></div>
-                    </div>
-                  )}
-                  {contactInfo.email && (
-                    <div className="flex items-center gap-3">
-                      <span className="text-lg">📧</span>
-                      <div><p className="text-xs text-gray-400">Email</p><a href={"mailto:" + contactInfo.email} className="text-sm font-medium text-red-600 hover:underline">{contactInfo.email}</a></div>
-                    </div>
-                  )}
-                  {contactInfo.phone && (
-                    <div className="flex items-center gap-3">
-                      <span className="text-lg">📞</span>
-                      <div><p className="text-xs text-gray-400">Phone</p><a href={"tel:" + contactInfo.phone} className="text-sm font-medium text-red-600 hover:underline">{contactInfo.phone}</a></div>
-                    </div>
-                  )}
-                  {contactInfo.linkedin && (
-                    <div className="flex items-center gap-3">
-                      <span className="text-lg">💼</span>
-                      <div><p className="text-xs text-gray-400">LinkedIn</p><a href={contactInfo.linkedin} target="_blank" rel="noopener noreferrer" className="text-sm font-medium text-red-600 hover:underline">View Profile</a></div>
-                    </div>
-                  )}
-                  {contactInfo.notes && (
-                    <div className="mt-3 p-3 bg-gray-50 rounded-lg">
-                      <p className="text-xs text-gray-500">{contactInfo.notes}</p>
-                    </div>
-                  )}
-                </div>
-              ) : null}
-              <div className="flex gap-2 mt-5 pt-4 border-t border-gray-100">
-                <a href={"https://www.google.com/search?q=" + encodeURIComponent(contactModal.name + " " + contactModal.agency + " Washington procurement")} target="_blank" rel="noopener noreferrer" className="flex-1 text-center text-xs font-semibold px-3 py-2 rounded-lg border border-gray-300 hover:border-gray-400 text-gray-600 hover:text-gray-800 transition-colors">
-                  🔍 Google
+              {contactModal.email && (
+                <a href={'mailto:' + contactModal.email} className="flex items-center gap-3 p-3 rounded-lg bg-gray-50 hover:bg-red-50 transition-colors mb-4 group">
+                  <span className="text-xl">📧</span>
+                  <div>
+                    <p className="text-xs text-gray-400">Email</p>
+                    <p className="text-sm font-medium text-red-600 group-hover:underline">{contactModal.email}</p>
+                  </div>
                 </a>
-                <a href={"https://www.linkedin.com/search/results/people/?keywords=" + encodeURIComponent(contactModal.name + " " + contactModal.agency)} target="_blank" rel="noopener noreferrer" className="flex-1 text-center text-xs font-semibold px-3 py-2 rounded-lg border border-gray-300 hover:border-gray-400 text-gray-600 hover:text-gray-800 transition-colors">
-                  💼 LinkedIn
+              )}
+              <p className="text-xs text-gray-400 mb-3 text-center">Find this contact online</p>
+              <div className="grid grid-cols-2 gap-3">
+                <a
+                  href={contactModal.googleUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl border-2 border-gray-200 hover:border-red-400 hover:bg-red-50 transition-all text-sm font-semibold text-gray-700 hover:text-red-700"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 11h8.533c.044.385.067.78.067 1.184C20.6 17.48 17.04 21 12 21c-4.97 0-9-4.03-9-9s4.03-9 9-9c2.395 0 4.565.94 6.185 2.47L16.2 7.4A6.5 6.5 0 1018.5 12H12v-1z" /></svg>
+                  Google
+                </a>
+                <a
+                  href={contactModal.linkedinUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl border-2 border-gray-200 hover:border-blue-400 hover:bg-blue-50 transition-all text-sm font-semibold text-gray-700 hover:text-blue-700"
+                >
+                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
+                  LinkedIn
                 </a>
               </div>
+              <p className="text-xs text-gray-400 mt-4 text-center leading-relaxed">
+                Search opens with <span className="font-medium text-gray-600">"{contactModal.name} {contactModal.agency} Washington"</span>
+              </p>
             </div>
           </div>
         </div>
@@ -327,7 +298,7 @@ export default function App() {
               <span className="text-gray-400 text-xs">{total} active opportunities</span>
             </div>
             <h1 className="text-4xl md:text-6xl font-bold text-white leading-tight mb-6">
-              Washington State <span style={{ color: '#EE0000' }}>RFP</span> Tracker
+              Washington State<span style={{ color: '#EE0000' }}> RFP </span>Tracker
             </h1>
             <p className="text-gray-300 text-lg md:text-xl leading-relaxed mb-10 max-w-2xl">
               Find and track active procurement opportunities from every Washington State government agency, county, city, transit authority, port, and university — all in one place, updated every morning.
@@ -352,21 +323,19 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-4">
           <p className="text-center text-gray-400 text-sm mb-6">AGGREGATING PROCUREMENT DATA FROM</p>
           <div className="flex flex-wrap justify-center gap-6 md:gap-10">
-            {['WEBS / DES', 'King County', 'City of Seattle', 'Sound Transit', 'Pierce County', 'Port of Seattle', 'UW', 'WSU', 'WSDOT', 'City of Tacoma'].map(agency => (
-              <span key={agency} className="text-gray-500 text-sm font-medium">{agency}</span>
+            {['WEBS / DES', 'King County', 'City of Seattle', 'Sound Transit', 'Pierce County', 'Port of Seattle', 'UW', 'WSU', 'WSDOT', 'City of Tacoma'].map(a => (
+              <span key={a} className="text-gray-500 text-sm font-medium">{a}</span>
             ))}
           </div>
         </div>
       </section>
 
-      {/* Search & filters */}
+      {/* Search & Filters */}
       <section id="search-section" className="py-6 sticky top-16 z-30 bg-white border-b border-gray-200 shadow-sm">
         <div className="max-w-7xl mx-auto px-4">
           <div className="flex flex-col md:flex-row gap-3 mb-4">
             <div className="flex-1 relative">
-              <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-              </svg>
+              <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
               <input
                 type="text"
                 placeholder="Search RFPs by title or keyword..."
@@ -402,7 +371,7 @@ export default function App() {
         </div>
       </section>
 
-      {/* RFP list */}
+      {/* RFP List */}
       <main className="max-w-7xl mx-auto px-4 py-8">
         {loading ? (
           <div className="text-center py-20">
@@ -419,7 +388,7 @@ export default function App() {
           <>
             <div className="flex items-center justify-between mb-6">
               <p className="text-sm text-gray-500">
-                Showing <span className="font-semibold text-gray-900">{((page - 1) * PER_PAGE) + 1}</span> – <span className="font-semibold text-gray-900">{Math.min(page * PER_PAGE, total)}</span> of <span className="font-semibold text-gray-900">{total}</span> results
+                Showing <span className="font-semibold text-gray-900">{((page - 1) * PER_PAGE) + 1}</span>–<span className="font-semibold text-gray-900">{Math.min(page * PER_PAGE, total)}</span> of <span className="font-semibold text-gray-900">{total}</span> results
                 {category !== 'All' && <span className="ml-2 text-red-600 font-medium">in {category}</span>}
               </p>
             </div>
@@ -429,8 +398,13 @@ export default function App() {
                 const daysLeft = getDaysLeft(rfp.due_date)
                 const docs = getDocuments(rfp)
                 const hasDocuments = rfp.source_platform === 'Procureware'
+                const isFarOut = daysLeft !== null && daysLeft > 100
+
                 return (
-                  <div key={rfp.id} className="bg-white rounded-xl border border-gray-200 p-5 hover:border-red-300 hover:shadow-md transition-all group">
+                  <div
+                    key={rfp.id}
+                    className={"bg-white rounded-xl border p-5 hover:shadow-md transition-all group " + (isFarOut ? "border-gray-100 opacity-80" : "border-gray-200 hover:border-red-300")}
+                  >
                     <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-2 flex-wrap">
@@ -444,28 +418,27 @@ export default function App() {
                           {rfp.includes_inclusion_plan && <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-blue-50 text-blue-600 border border-blue-200">Inclusion Plan</span>}
                           {hasDocuments && docs.length > 0 && <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-green-50 text-green-700 border border-green-200">📄 {docs.length} doc{docs.length !== 1 ? 's' : ''}</span>}
                         </div>
+
                         <h2 className="font-bold text-gray-900 text-base md:text-lg leading-snug mb-2 group-hover:text-red-700 transition-colors">{rfp.title}</h2>
+
                         {rfp.description && <p className="text-gray-500 text-sm leading-relaxed mb-3 line-clamp-2">{rfp.description}</p>}
+
                         <div className="flex items-center gap-4 text-xs text-gray-400 flex-wrap">
                           {rfp.ref_number && <span><span className="font-medium text-gray-500">Ref:</span> {rfp.ref_number}</span>}
                           {rfp.contact_name && (
-                            <button
-                              onClick={() => openContactModal(rfp)}
-                              className="flex items-center gap-1 hover:text-red-600 transition-colors group/contact"
-                            >
-                              <span className="font-medium text-gray-500 group-hover/contact:text-red-500">Contact:</span>
+                            <button onClick={() => openContactModal(rfp)} className="flex items-center gap-1 hover:text-red-600 transition-colors group/c">
+                              <span className="font-medium text-gray-500 group-hover/c:text-red-500">Contact:</span>
                               <span className="underline decoration-dotted underline-offset-2">{rfp.contact_name}</span>
-                              <svg className="w-3 h-3 text-gray-300 group-hover/contact:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                              </svg>
+                              <svg className="w-3 h-3 text-gray-300 group-hover/c:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
                             </button>
                           )}
                         </div>
                       </div>
+
                       <div className="flex flex-row md:flex-col items-center md:items-end gap-3 md:gap-2 md:min-w-36 flex-shrink-0">
                         <div className="text-right">
                           <div className="text-xs text-gray-400 uppercase tracking-wide mb-1">Due Date</div>
-                          <div className="text-sm font-bold text-gray-800">{formatDate(rfp.due_date)}</div>
+                          <div className={"text-sm font-bold " + (isFarOut ? "text-gray-400" : "text-gray-800")}>{formatDate(rfp.due_date)}</div>
                           {daysLeft !== null && (
                             <div className={"text-xs mt-0.5 " + getDaysColor(daysLeft)}>
                               {daysLeft < 0 ? 'Expired' : daysLeft === 0 ? 'Due today!' : daysLeft + ' days left'}
@@ -493,7 +466,7 @@ export default function App() {
 
             {totalPages > 1 && (
               <div className="flex items-center justify-center gap-2 mt-10">
-                <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} className="px-5 py-2.5 rounded-lg border border-gray-300 text-sm font-medium disabled:opacity-40 hover:bg-gray-50 transition-colors">Previous</button>
+                <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} className="px-5 py-2.5 rounded-lg border border-gray-300 text-sm font-medium disabled:opacity-40 hover:bg-gray-50 transition-colors">← Previous</button>
                 <div className="flex items-center gap-1">
                   {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
                     const pageNum = Math.max(1, Math.min(page - 2, totalPages - 4)) + i
@@ -517,9 +490,7 @@ export default function App() {
           <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-10">
             <div className="md:col-span-2">
               <div className="flex items-center gap-2 mb-4">
-                <div style={{ backgroundColor: '#EE0000' }} className="w-7 h-7 rounded flex items-center justify-center">
-                  <span className="text-white font-bold text-xs">WA</span>
-                </div>
+                <div style={{ backgroundColor: '#EE0000' }} className="w-7 h-7 rounded flex items-center justify-center"><span className="text-white font-bold text-xs">WA</span></div>
                 <span className="text-white font-bold">WA RFP Tracker</span>
               </div>
               <p className="text-gray-400 text-sm leading-relaxed max-w-sm">The most comprehensive source for Washington State government procurement opportunities. Updated daily from 25+ official sources.</p>
