@@ -50,14 +50,22 @@ def parse_rfps_from_html(html):
             if ref_span:
                 ref_number = clean_text(ref_span.find_next_sibling(string=True))
 
-            contact = None
             cell_texts = [clean_text(c.get_text()) for c in cells]
-            if len(cell_texts) >= 3:
-                contact = cell_texts[-1]
 
-            close_date = None
-            if cell_texts:
-                close_date = parse_due_date(cell_texts[0])
+            # WEBS column order: Close Date | Ref# | Title/Link | Agency | Contact
+            close_date = parse_due_date(cell_texts[0]) if cell_texts else None
+            contact = cell_texts[-1] if len(cell_texts) >= 2 else None
+
+            # Agency is the second-to-last cell (before contact)
+            agency = None
+            if len(cell_texts) >= 3:
+                agency = cell_texts[-2]
+                # Sanity check — agency shouldn't look like a date or ref number
+                if agency and (re.match(r'^\d{1,2}/\d{1,2}/\d{2,4}$', agency) or agency.startswith("Ref")):
+                    agency = None
+                # Clean up common non-agency values
+                if agency and len(agency) < 3:
+                    agency = None
 
             current_rfp = {
                 "title": title,
@@ -65,11 +73,11 @@ def parse_rfps_from_html(html):
                 "ref_number": ref_number,
                 "contact_name": contact,
                 "due_date": close_date,
+                "agency": agency,
                 "source_name": SOURCE_NAME,
                 "source_platform": "WEBS",
                 "source_url": BASE_URL,
                 "status": "active",
-                "agency": None,
                 "description": None,
                 "rfp_type": None,
                 "includes_inclusion_plan": False,
@@ -169,6 +177,10 @@ async def scrape_all_pages():
             rfps = parse_rfps_from_html(html)
             print("Found " + str(len(rfps)) + " RFPs on page " + str(page_num))
 
+            # Debug: print first RFP agency on each page
+            if rfps:
+                print("Sample agency: " + str(rfps[0].get("agency")))
+
             if not rfps:
                 print("No RFPs found, stopping")
                 break
@@ -221,8 +233,8 @@ def run():
         all_rfps = deduplicate(all_rfps)
         print("Total after dedup: " + str(len(all_rfps)))
 
-        has_desc = sum(1 for r in all_rfps if r.get("description"))
-        print("RFPs with descriptions: " + str(has_desc))
+        has_agency = sum(1 for r in all_rfps if r.get("agency"))
+        print("RFPs with agency: " + str(has_agency))
 
         if all_rfps:
             batch_size = 50
