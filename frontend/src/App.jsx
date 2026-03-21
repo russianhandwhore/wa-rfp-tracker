@@ -22,13 +22,15 @@ export default function App() {
   const [search, setSearch] = useState('')
   const [platform, setPlatform] = useState('All')
   const [category, setCategory] = useState('All')
-  const [sortBy, setSortBy] = useState('due_date_asc')
+  const [sortBy, setSortBy] = useState('created_at_desc')
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
   const [showExpired, setShowExpired] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [docsModal, setDocsModal] = useState(null)
   const [contactModal, setContactModal] = useState(null)
+  const [contactInfo, setContactInfo] = useState(null)
+  const [contactLoading, setContactLoading] = useState(false)
 
   useEffect(() => { fetchRfps() }, [search, platform, page, showExpired, category, sortBy])
 
@@ -57,11 +59,11 @@ export default function App() {
 
     if (search) query = query.ilike('title', '%' + search + '%')
     if (platform !== 'All') query = query.eq('source_platform', platform)
+    if (category !== 'All') query = query.contains('categories', [category])
     if (!showExpired) {
       const now = new Date().toISOString()
       query = query.or('due_date.gte.' + now + ',due_date.is.null')
     }
-    if (category !== 'All') query = query.contains('categories', [category])
 
     const { data, count, error } = await query
     if (!error) {
@@ -117,26 +119,40 @@ export default function App() {
     setDocsModal({ title: rfp.title, detailUrl: rfp.detail_url, documents: getDocuments(rfp) })
   }
 
-  function openContactModal(rfp) {
-    // Build smart search queries
+  async function openContactModal(rfp) {
     const name = rfp.contact_name
-    const agency = rfp.agency || ''
+    const agency = rfp.agency || rfp.source_name || ''
     const dept = rfp.department || ''
     const location = agency || dept
 
-    // Google: "First Last Department Washington State procurement"
     const googleQuery = [name, location, 'Washington State', 'procurement'].filter(Boolean).join(' ')
-    // LinkedIn: name + agency
     const linkedinQuery = [name, location, 'Washington'].filter(Boolean).join(' ')
 
     setContactModal({
       name,
-      agency: rfp.agency || rfp.source_name,
-      department: rfp.department,
+      agency,
+      department: dept || null,
       email: rfp.contact_email || null,
       googleUrl: 'https://www.google.com/search?q=' + encodeURIComponent(googleQuery),
       linkedinUrl: 'https://www.linkedin.com/search/results/people/?keywords=' + encodeURIComponent(linkedinQuery),
     })
+    setContactInfo(null)
+    setContactLoading(true)
+
+    try {
+      // Calls our own Vercel serverless function — API key stays on the server
+      const res = await fetch('/api/contact', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, agency })
+      })
+      if (!res.ok) throw new Error('Failed')
+      const parsed = await res.json()
+      setContactInfo(parsed)
+    } catch (e) {
+      setContactInfo({ _error: true })
+    }
+    setContactLoading(false)
   }
 
   function scrollToSearch() {
@@ -200,6 +216,8 @@ export default function App() {
       {contactModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(0,0,0,0.6)' }} onClick={() => setContactModal(null)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden" onClick={e => e.stopPropagation()}>
+
+            {/* Header */}
             <div className="flex items-start justify-between p-6 border-b border-gray-100">
               <div>
                 <p className="text-xs text-gray-400 uppercase tracking-wide font-semibold mb-1">Procurement Contact</p>
@@ -207,44 +225,64 @@ export default function App() {
                 {contactModal.agency && <p className="text-sm text-gray-500 mt-0.5">{contactModal.agency}</p>}
                 {contactModal.department && <p className="text-xs text-gray-400 mt-0.5">{contactModal.department}</p>}
               </div>
-              <button onClick={() => setContactModal(null)} className="text-gray-400 hover:text-gray-600 transition-colors ml-4 flex-shrink-0">
+              <button onClick={() => setContactModal(null)} className="text-gray-400 hover:text-gray-600 ml-4 flex-shrink-0">
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
               </button>
             </div>
-            <div className="p-6">
-              {contactModal.email && (
-                <a href={'mailto:' + contactModal.email} className="flex items-center gap-3 p-3 rounded-lg bg-gray-50 hover:bg-red-50 transition-colors mb-4 group">
-                  <span className="text-xl">📧</span>
-                  <div>
-                    <p className="text-xs text-gray-400">Email</p>
-                    <p className="text-sm font-medium text-red-600 group-hover:underline">{contactModal.email}</p>
-                  </div>
-                </a>
-              )}
-              <p className="text-xs text-gray-400 mb-3 text-center">Find this contact online</p>
-              <div className="grid grid-cols-2 gap-3">
-                <a
-                  href={contactModal.googleUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl border-2 border-gray-200 hover:border-red-400 hover:bg-red-50 transition-all text-sm font-semibold text-gray-700 hover:text-red-700"
-                >
-                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 11h8.533c.044.385.067.78.067 1.184C20.6 17.48 17.04 21 12 21c-4.97 0-9-4.03-9-9s4.03-9 9-9c2.395 0 4.565.94 6.185 2.47L16.2 7.4A6.5 6.5 0 1018.5 12H12v-1z" /></svg>
-                  Google
-                </a>
-                <a
-                  href={contactModal.linkedinUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl border-2 border-gray-200 hover:border-blue-400 hover:bg-blue-50 transition-all text-sm font-semibold text-gray-700 hover:text-blue-700"
-                >
-                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
-                  LinkedIn
-                </a>
+
+            <div className="p-6 space-y-4">
+
+              {/* AI lookup results */}
+              {contactLoading ? (
+                <div className="flex items-center gap-3 p-4 bg-gray-50 rounded-xl">
+                  <div className="w-5 h-5 border-2 border-red-500 border-t-transparent rounded-full animate-spin flex-shrink-0"></div>
+                  <p className="text-sm text-gray-500">Looking up contact info...</p>
+                </div>
+              ) : contactInfo && !contactInfo._error ? (
+                <div className="space-y-2">
+                  {contactInfo.title && contactInfo.title !== 'null' && (
+                    <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl">
+                      <span className="text-lg">🏢</span>
+                      <div><p className="text-xs text-gray-400">Title</p><p className="text-sm font-medium text-gray-800">{contactInfo.title}</p></div>
+                    </div>
+                  )}
+                  {contactInfo.email && contactInfo.email !== 'null' && contactInfo.email !== null && (
+                    <a href={'mailto:' + contactInfo.email} className="flex items-center gap-3 p-3 bg-gray-50 hover:bg-red-50 rounded-xl transition-colors group">
+                      <span className="text-lg">📧</span>
+                      <div><p className="text-xs text-gray-400">Email</p><p className="text-sm font-medium text-red-600 group-hover:underline">{contactInfo.email}</p></div>
+                    </a>
+                  )}
+                  {contactInfo.phone && contactInfo.phone !== 'null' && contactInfo.phone !== null && (
+                    <a href={'tel:' + contactInfo.phone} className="flex items-center gap-3 p-3 bg-gray-50 hover:bg-red-50 rounded-xl transition-colors group">
+                      <span className="text-lg">📞</span>
+                      <div><p className="text-xs text-gray-400">Phone</p><p className="text-sm font-medium text-red-600 group-hover:underline">{contactInfo.phone}</p></div>
+                    </a>
+                  )}
+                  {!contactInfo.email && !contactInfo.phone && (
+                    <p className="text-xs text-gray-400 text-center py-2">No contact details found — try searching below</p>
+                  )}
+                </div>
+              ) : contactInfo?._error ? (
+                <p className="text-xs text-gray-400 text-center py-2 bg-gray-50 rounded-xl p-3">Could not auto-fetch details — use the search buttons below</p>
+              ) : null}
+
+              {/* Always show Google + LinkedIn */}
+              <div>
+                <p className="text-xs text-gray-400 mb-2 text-center">Search manually</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <a href={contactModal.googleUrl} target="_blank" rel="noopener noreferrer"
+                    className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl border-2 border-gray-200 hover:border-red-400 hover:bg-red-50 transition-all text-sm font-semibold text-gray-700 hover:text-red-700">
+                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 11h8.533c.044.385.067.78.067 1.184C20.6 17.48 17.04 21 12 21c-4.97 0-9-4.03-9-9s4.03-9 9-9c2.395 0 4.565.94 6.185 2.47L16.2 7.4A6.5 6.5 0 1018.5 12H12v-1z" /></svg>
+                    Google
+                  </a>
+                  <a href={contactModal.linkedinUrl} target="_blank" rel="noopener noreferrer"
+                    className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl border-2 border-gray-200 hover:border-blue-400 hover:bg-blue-50 transition-all text-sm font-semibold text-gray-700 hover:text-blue-700">
+                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
+                    LinkedIn
+                  </a>
+                </div>
               </div>
-              <p className="text-xs text-gray-400 mt-4 text-center leading-relaxed">
-                Search opens with <span className="font-medium text-gray-600">"{contactModal.name} {contactModal.agency} Washington"</span>
-              </p>
+
             </div>
           </div>
         </div>
