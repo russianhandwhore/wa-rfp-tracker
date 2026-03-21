@@ -20,10 +20,18 @@ export default function App() {
   const [total, setTotal] = useState(0)
   const [showExpired, setShowExpired] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const [docsModal, setDocsModal] = useState(null) // { title, documents: [{name, url}] }
 
   useEffect(() => {
     fetchRfps()
   }, [search, platform, page, showExpired, category])
+
+  // Close modal on Escape key
+  useEffect(() => {
+    const handler = (e) => { if (e.key === 'Escape') setDocsModal(null) }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
 
   async function fetchRfps() {
     setLoading(true)
@@ -34,18 +42,10 @@ export default function App() {
       .order('due_date', { ascending: true })
       .range((page - 1) * PER_PAGE, page * PER_PAGE - 1)
 
-    if (search) {
-      query = query.ilike('title', '%' + search + '%')
-    }
-    if (platform !== 'All') {
-      query = query.eq('source_platform', platform)
-    }
-    if (!showExpired) {
-      query = query.gte('due_date', new Date().toISOString())
-    }
-    if (category !== 'All') {
-      query = query.contains('categories', [category])
-    }
+    if (search) query = query.ilike('title', '%' + search + '%')
+    if (platform !== 'All') query = query.eq('source_platform', platform)
+    if (!showExpired) query = query.gte('due_date', new Date().toISOString())
+    if (category !== 'All') query = query.contains('categories', [category])
 
     const { data, count, error } = await query
     if (!error) {
@@ -85,6 +85,21 @@ export default function App() {
     return colors[cat] || 'bg-gray-50 text-gray-700 border-gray-200'
   }
 
+  function getDocuments(rfp) {
+    if (!rfp.raw_data) return []
+    try {
+      const parsed = typeof rfp.raw_data === 'string' ? JSON.parse(rfp.raw_data) : rfp.raw_data
+      return parsed.documents || []
+    } catch {
+      return []
+    }
+  }
+
+  function openDocsModal(rfp) {
+    const docs = getDocuments(rfp)
+    setDocsModal({ title: rfp.title, detailUrl: rfp.detail_url, documents: docs })
+  }
+
   function scrollToSearch() {
     document.getElementById('search-section').scrollIntoView({ behavior: 'smooth' })
   }
@@ -94,7 +109,104 @@ export default function App() {
   return (
     <div className="min-h-screen bg-gray-50">
 
-      <nav style={{ backgroundColor: '#151515' }} className="sticky top-0 z-50 border-b border-gray-800">
+      {/* Documents Modal */}
+      {docsModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ backgroundColor: 'rgba(0,0,0,0.6)' }}
+          onClick={() => setDocsModal(null)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-screen overflow-hidden flex flex-col"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Modal header */}
+            <div className="flex items-start justify-between p-6 border-b border-gray-100">
+              <div className="flex-1 pr-4">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: '#FFF0F0', color: '#CC0000' }}>
+                    Procureware
+                  </span>
+                </div>
+                <h2 className="font-bold text-gray-900 text-base leading-snug">{docsModal.title}</h2>
+              </div>
+              <button
+                onClick={() => setDocsModal(null)}
+                className="text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Document list */}
+            <div className="overflow-y-auto flex-1 p-6">
+              {docsModal.documents.length === 0 ? (
+                <div className="text-center py-8">
+                  <div className="text-4xl mb-3">📂</div>
+                  <p className="text-gray-500 text-sm mb-4">No documents were scraped for this bid.</p>
+                  {docsModal.detailUrl && (
+                    <a
+                      href={docsModal.detailUrl + '?t=BidDocuments'}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ backgroundColor: '#EE0000' }}
+                      className="inline-block text-white text-sm font-semibold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity"
+                    >
+                      View Documents on Procureware →
+                    </a>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-xs text-gray-400 uppercase tracking-wide font-semibold mb-3">
+                    {docsModal.documents.length} document{docsModal.documents.length !== 1 ? 's' : ''} available
+                  </p>
+                  {docsModal.documents.map((doc, i) => (
+                    <a
+                      key={i}
+                      href={doc.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-3 p-3 rounded-lg border border-gray-200 hover:border-red-300 hover:bg-red-50 transition-all group"
+                    >
+                      <div className="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0 group-hover:bg-red-100 transition-colors">
+                        <svg className="w-4 h-4 text-gray-500 group-hover:text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                      </div>
+                      <span className="text-sm text-gray-700 group-hover:text-red-700 font-medium flex-1 truncate">
+                        {doc.name}
+                      </span>
+                      <svg className="w-4 h-4 text-gray-400 group-hover:text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                      </svg>
+                    </a>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Modal footer */}
+            {docsModal.detailUrl && (
+              <div className="p-4 border-t border-gray-100 bg-gray-50">
+                <a
+                  href={docsModal.detailUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm text-gray-500 hover:text-red-600 transition-colors"
+                >
+                  View full bid on Procureware →
+                </a>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Navbar */}
+      <nav style={{ backgroundColor: '#151515' }} className="sticky top-0 z-40 border-b border-gray-800">
         <div className="max-w-7xl mx-auto px-4">
           <div className="flex items-center justify-between h-16">
             <div className="flex items-center gap-3">
@@ -103,46 +215,39 @@ export default function App() {
               </div>
               <span className="text-white font-bold text-lg">WA RFP Tracker</span>
             </div>
-
             <div className="hidden md:flex items-center gap-8">
               <a href="#" className="text-gray-300 hover:text-white text-sm transition-colors">Home</a>
               <a href="#search-section" className="text-gray-300 hover:text-white text-sm transition-colors">Browse RFPs</a>
               <a href="#" className="text-gray-300 hover:text-white text-sm transition-colors">About</a>
               <a href="#" className="text-gray-300 hover:text-white text-sm transition-colors">Sources</a>
               <a href="#" className="text-gray-300 hover:text-white text-sm transition-colors">Contact</a>
-              <a href="#search-section" onClick={scrollToSearch} style={{ backgroundColor: '#EE0000' }} className="text-white text-sm font-medium px-4 py-2 rounded hover:opacity-90 transition-opacity">
+              <button onClick={scrollToSearch} style={{ backgroundColor: '#EE0000' }} className="text-white text-sm font-medium px-4 py-2 rounded hover:opacity-90 transition-opacity">
                 Find RFPs
-              </a>
+              </button>
             </div>
-
-            <button
-              className="md:hidden text-gray-300 hover:text-white"
-              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-            >
+            <button className="md:hidden text-gray-300 hover:text-white" onClick={() => setMobileMenuOpen(!mobileMenuOpen)}>
               <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={mobileMenuOpen ? "M6 18L18 6M6 6l12 12" : "M4 6h16M4 12h16M4 18h16"} />
               </svg>
             </button>
           </div>
-
           {mobileMenuOpen && (
             <div className="md:hidden pb-4 space-y-2">
               <a href="#" className="block text-gray-300 hover:text-white text-sm py-2">Home</a>
               <a href="#search-section" className="block text-gray-300 hover:text-white text-sm py-2">Browse RFPs</a>
               <a href="#" className="block text-gray-300 hover:text-white text-sm py-2">About</a>
-              <a href="#" className="block text-gray-300 hover:text-white text-sm py-2">Sources</a>
               <a href="#" className="block text-gray-300 hover:text-white text-sm py-2">Contact</a>
             </div>
           )}
         </div>
       </nav>
 
+      {/* Hero */}
       <section style={{ background: 'linear-gradient(135deg, #151515 0%, #1a1a2e 50%, #16213e 100%)' }} className="relative overflow-hidden">
         <div className="absolute inset-0 opacity-10">
           <div className="absolute top-20 left-10 w-72 h-72 rounded-full" style={{ backgroundColor: '#EE0000', filter: 'blur(80px)' }}></div>
           <div className="absolute bottom-10 right-20 w-96 h-96 rounded-full" style={{ backgroundColor: '#1a56db', filter: 'blur(100px)' }}></div>
         </div>
-
         <div className="relative max-w-7xl mx-auto px-4 py-24 md:py-32">
           <div className="max-w-3xl">
             <div className="flex items-center gap-2 mb-6">
@@ -151,33 +256,22 @@ export default function App() {
               </span>
               <span className="text-gray-400 text-xs">{total} active opportunities</span>
             </div>
-
             <h1 className="text-4xl md:text-6xl font-bold text-white leading-tight mb-6">
               Washington State
               <span style={{ color: '#EE0000' }}> RFP </span>
               Tracker
             </h1>
-
             <p className="text-gray-300 text-lg md:text-xl leading-relaxed mb-10 max-w-2xl">
               Find and track active procurement opportunities from every Washington State government agency, county, city, transit authority, port, and university — all in one place, updated every morning.
             </p>
-
             <div className="flex flex-col sm:flex-row gap-4">
-              <button
-                onClick={scrollToSearch}
-                style={{ backgroundColor: '#EE0000' }}
-                className="text-white font-semibold px-8 py-4 rounded-lg hover:opacity-90 transition-opacity text-lg"
-              >
+              <button onClick={scrollToSearch} style={{ backgroundColor: '#EE0000' }} className="text-white font-semibold px-8 py-4 rounded-lg hover:opacity-90 transition-opacity text-lg">
                 Browse Active RFPs
               </button>
-              <a
-                href="#"
-                className="text-white font-semibold px-8 py-4 rounded-lg border border-gray-600 hover:border-gray-400 transition-colors text-lg text-center"
-              >
+              <a href="#" className="text-white font-semibold px-8 py-4 rounded-lg border border-gray-600 hover:border-gray-400 transition-colors text-lg text-center">
                 Learn More
               </a>
             </div>
-
             <div className="flex items-center gap-8 mt-12 pt-12 border-t border-gray-800">
               <div>
                 <div className="text-3xl font-bold text-white">{total}+</div>
@@ -198,6 +292,7 @@ export default function App() {
         </div>
       </section>
 
+      {/* Agency logos bar */}
       <section className="bg-white border-b border-gray-200 py-8">
         <div className="max-w-7xl mx-auto px-4">
           <p className="text-center text-gray-400 text-sm mb-6">AGGREGATING PROCUREMENT DATA FROM</p>
@@ -209,7 +304,8 @@ export default function App() {
         </div>
       </section>
 
-      <section id="search-section" className="py-6 sticky top-16 z-40 bg-white border-b border-gray-200 shadow-sm">
+      {/* Search & filters */}
+      <section id="search-section" className="py-6 sticky top-16 z-30 bg-white border-b border-gray-200 shadow-sm">
         <div className="max-w-7xl mx-auto px-4">
           <div className="flex flex-col md:flex-row gap-3 mb-4">
             <div className="flex-1 relative">
@@ -243,7 +339,6 @@ export default function App() {
               <span className="text-sm text-gray-600 whitespace-nowrap">Show Expired</span>
             </label>
           </div>
-
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-1">Category:</span>
             {CATEGORIES.map(cat => (
@@ -270,6 +365,7 @@ export default function App() {
         </div>
       </section>
 
+      {/* RFP List */}
       <main className="max-w-7xl mx-auto px-4 py-8">
         {loading ? (
           <div className="text-center py-20">
@@ -294,6 +390,9 @@ export default function App() {
             <div className="space-y-4">
               {rfps.map(rfp => {
                 const daysLeft = getDaysLeft(rfp.due_date)
+                const docs = getDocuments(rfp)
+                const hasDocuments = rfp.source_platform === 'Procureware'
+
                 return (
                   <div key={rfp.id} className="bg-white rounded-xl border border-gray-200 p-5 hover:border-red-300 hover:shadow-md transition-all group">
                     <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
@@ -309,16 +408,17 @@ export default function App() {
                           )}
                           {rfp.categories && rfp.categories.map(cat => (
                             <span key={cat} className={"text-xs font-medium px-2.5 py-1 rounded-full border " + getCategoryColor(cat)}>
-                              {cat === 'IT' ? '💻 IT' :
-                               cat === 'Construction' ? '🏗️ Construction' :
-                               cat === 'Supplies' ? '📦 Supplies' :
-                               cat === 'Services' ? '🤝 Services' :
-                               '📋 Misc'}
+                              {cat === 'IT' ? '💻 IT' : cat === 'Construction' ? '🏗️ Construction' : cat === 'Supplies' ? '📦 Supplies' : cat === 'Services' ? '🤝 Services' : '📋 Misc'}
                             </span>
                           ))}
                           {rfp.includes_inclusion_plan && (
                             <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-blue-50 text-blue-600 border border-blue-200">
                               Inclusion Plan
+                            </span>
+                          )}
+                          {hasDocuments && docs.length > 0 && (
+                            <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-green-50 text-green-700 border border-green-200">
+                              📄 {docs.length} doc{docs.length !== 1 ? 's' : ''}
                             </span>
                           )}
                         </div>
@@ -335,19 +435,15 @@ export default function App() {
 
                         <div className="flex items-center gap-4 text-xs text-gray-400 flex-wrap">
                           {rfp.ref_number && (
-                            <span className="flex items-center gap-1">
-                              <span className="font-medium text-gray-500">Ref:</span> {rfp.ref_number}
-                            </span>
+                            <span><span className="font-medium text-gray-500">Ref:</span> {rfp.ref_number}</span>
                           )}
                           {rfp.contact_name && (
-                            <span className="flex items-center gap-1">
-                              <span className="font-medium text-gray-500">Contact:</span> {rfp.contact_name}
-                            </span>
+                            <span><span className="font-medium text-gray-500">Contact:</span> {rfp.contact_name}</span>
                           )}
                         </div>
                       </div>
 
-                      <div className="flex flex-row md:flex-col items-center md:items-end gap-4 md:gap-2 md:min-w-36 flex-shrink-0">
+                      <div className="flex flex-row md:flex-col items-center md:items-end gap-3 md:gap-2 md:min-w-36 flex-shrink-0">
                         <div className="text-right">
                           <div className="text-xs text-gray-400 uppercase tracking-wide mb-1">Due Date</div>
                           <div className="text-sm font-bold text-gray-800">{formatDate(rfp.due_date)}</div>
@@ -357,17 +453,28 @@ export default function App() {
                             </div>
                           )}
                         </div>
-                        {rfp.detail_url && (
-                          <a
-                            href={rfp.detail_url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            style={{ backgroundColor: '#EE0000' }}
-                            className="text-white text-xs font-semibold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity whitespace-nowrap"
-                          >
-                            View RFP →
-                          </a>
-                        )}
+
+                        <div className="flex flex-col gap-2 w-full md:items-end">
+                          {rfp.detail_url && (
+                            <a
+                              href={rfp.detail_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{ backgroundColor: '#EE0000' }}
+                              className="text-white text-xs font-semibold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity whitespace-nowrap text-center"
+                            >
+                              View RFP →
+                            </a>
+                          )}
+                          {hasDocuments && (
+                            <button
+                              onClick={() => openDocsModal(rfp)}
+                              className="text-xs font-semibold px-4 py-2 rounded-lg border-2 border-gray-300 hover:border-red-400 hover:text-red-600 transition-all whitespace-nowrap bg-white"
+                            >
+                              📄 Documents
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -412,6 +519,7 @@ export default function App() {
         )}
       </main>
 
+      {/* Footer */}
       <footer style={{ backgroundColor: '#151515' }} className="mt-16">
         <div className="max-w-7xl mx-auto px-4 py-12">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-10">
@@ -446,9 +554,7 @@ export default function App() {
             </div>
           </div>
           <div className="border-t border-gray-800 pt-6 flex flex-col md:flex-row items-center justify-between gap-4">
-            <p className="text-gray-500 text-sm">
-              Washington State RFP Tracker — Not affiliated with any government agency. Data sourced from public procurement portals.
-            </p>
+            <p className="text-gray-500 text-sm">Washington State RFP Tracker — Not affiliated with any government agency.</p>
             <p className="text-gray-600 text-xs">Updated daily at 7am Pacific</p>
           </div>
         </div>
