@@ -69,10 +69,11 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 200,  // Keep low to limit cost per call (~$0.0001)
+        max_tokens: 500,
+        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
         messages: [{
           role: 'user',
-          content: `Find the work email and phone number for "${cleanName}" who works in government procurement at "${cleanAgency}" in Washington State. Return ONLY valid JSON: {"email": null, "phone": null, "title": null}. Use null for unknown fields. Do not guess or fabricate.`
+          content: `Search the web for the work email and phone number for "${cleanName}" who works in government procurement at "${cleanAgency}" in Washington State. Look for their official government contact page. After searching, return ONLY a valid JSON object: {"email": null, "phone": null, "title": null}. Use null for any field you cannot find. Do not guess.`
         }]
       })
     })
@@ -82,7 +83,9 @@ export default async function handler(req, res) {
     }
 
     const data = await response.json()
-    const text = data.content?.[0]?.text || '{}'
+    // Find the final text block (after any tool_use blocks)
+    const textBlock = (data.content || []).filter(b => b.type === 'text').pop()
+    const text = textBlock?.text || '{}'
     const clean = text.replace(/```json|```/g, '').trim()
 
     // Extract JSON even if Claude wraps it in extra text
