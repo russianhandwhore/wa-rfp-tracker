@@ -9,12 +9,26 @@ const supabase = createClient(
 const PLATFORMS = ['All', 'WEBS', 'OpenGov', 'Procureware', 'PublicPurchase', 'SAP_Ariba', 'Oracle', 'Bonfire', 'Workday', 'Biddingo', 'Standalone']
 const CATEGORIES = ['All', 'IT', 'Construction', 'Supplies', 'Services', 'Misc']
 const SORT_OPTIONS = [
-  { label: 'Due Date (soonest first)', value: 'due_date_asc' },
-  { label: 'Due Date (latest first)', value: 'due_date_desc' },
+  { label: 'Due Soonest', value: 'due_date_asc' },
+  { label: 'Due Latest', value: 'due_date_desc' },
   { label: 'Newest Added', value: 'created_at_desc' },
   { label: 'Oldest Added', value: 'created_at_asc' },
 ]
 const PER_PAGE = 25
+
+// Ref number pattern — Procureware titles that are just a ref number with no real name
+const REF_ONLY_PATTERN = /^(RFP|RFQ|ITB|IFB|RFI|IRFP|PW|BID|SOQ|EOI|QBS)[\s\-][\w\-\.]+$/i
+
+function isBlankCard(rfp) {
+  // Skip Procureware cards that only have a ref number as the title and no description
+  if (rfp.source_platform === 'Procureware') {
+    const titleIsRefOnly = REF_ONLY_PATTERN.test((rfp.title || '').trim())
+    if (titleIsRefOnly && !rfp.description) return true
+  }
+  // Skip any card with no title at all
+  if (!rfp.title || rfp.title.trim().length < 3) return true
+  return false
+}
 
 export default function App() {
   const [rfps, setRfps] = useState([])
@@ -22,9 +36,10 @@ export default function App() {
   const [search, setSearch] = useState('')
   const [platform, setPlatform] = useState('All')
   const [category, setCategory] = useState('All')
-  const [sortBy, setSortBy] = useState('created_at_desc')
+  const [sortBy, setSortBy] = useState('due_date_asc')
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
+  const [nearTotal, setNearTotal] = useState(0)
   const [showExpired, setShowExpired] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [docsModal, setDocsModal] = useState(null)
@@ -44,36 +59,85 @@ export default function App() {
 
   async function fetchRfps() {
     setLoading(true)
+
+    const now = new Date().toISOString()
+    const hundredDaysFromNow = new Date(Date.now() + 100 * 24 * 60 * 60 * 1000).toISOString()
+
+    // Sort column/direction
     const [sortCol, sortDir] =
       sortBy === 'due_date_asc'    ? ['due_date', true] :
       sortBy === 'due_date_desc'   ? ['due_date', false] :
       sortBy === 'created_at_desc' ? ['created_at', false] :
                                      ['created_at', true]
 
-    let query = supabase
+    function applyFilters(q) {
+      if (search) q = q.ilike('title', '%' + search + '%')
+      if (platform !== 'All') q = q.eq('source_platform', platform)
+      if (category !== 'All') q = q.contains('categories', [category])
+      return q
+    }
+
+    // --- Query 1: Near-term RFPs (due within 100 days or no due date) ---
+    // These fill pages 1 through N
+    let nearQuery = supabase
       .from('rfps')
       .select('*', { count: 'exact' })
       .eq('status', 'active')
       .order(sortCol, { ascending: sortDir })
-      .range((page - 1) * PER_PAGE, page * PER_PAGE - 1)
 
-    if (search) query = query.ilike('title', '%' + search + '%')
-    if (platform !== 'All') query = query.eq('source_platform', platform)
-    if (category !== 'All') query = query.contains('categories', [category])
+    nearQuery = applyFilters(nearQuery)
+
     if (!showExpired) {
-      const now = new Date().toISOString()
-      query = query.or('due_date.gte.' + now + ',due_date.is.null')
+      nearQuery = nearQuery.or('due_date.gte.' + now + ',due_date.is.null')
+    }
+    // Only near-term items (≤100 days) or NULL date
+    nearQuery = nearQuery.or('due_date.lte.' + hundredDaysFromNow + ',due_date.is.null')
+
+    // --- Query 2: Far-out RFPs (due after 100 days) ---
+    // These fill pages N+1 onwards
+    let farQuery = supabase
+      .from('rfps')
+      .select('*', { count: 'exact' })
+      .eq('status', 'active')
+      .gt('due_date', hundredDaysFromNow)
+      .order('due_date', { ascending: true }) // Always soonest first for far items
+
+    farQuery = applyFilters(farQuery)
+
+    // Get near count first to know pagination split
+    const { count: nTotal } = await nearQuery.range(0, 0)
+    const nearCount = nTotal || 0
+    const nearPages = Math.ceil(nearCount / PER_PAGE)
+
+    let data = []
+    let count = 0
+
+    // Get far count for total in all cases
+    const { count: fTotal } = await farQuery.range(0, 0)
+    const farCount = fTotal || 0
+    count = nearCount + farCount
+
+    if (nearPages > 0 && page <= nearPages) {
+      // Fetch from near query
+      const from = (page - 1) * PER_PAGE
+      const to = from + PER_PAGE - 1
+      const { data: d, error } = await nearQuery.range(from, to)
+      if (!error) { data = d || [] }
+    } else {
+      // Fetch from far query (either no near items, or we've passed near pages)
+      const farPage = nearPages > 0 ? page - nearPages : page
+      const from = (farPage - 1) * PER_PAGE
+      const to = from + PER_PAGE - 1
+      const { data: d, error } = await farQuery.range(from, to)
+      if (!error) { data = d || [] }
     }
 
-    const { data, count, error } = await query
-    if (!error) {
-      // Push 100+ day items to end but preserve the server-chosen sort within each group
-      const items = data || []
-      const near = items.filter(r => { const d = getDaysLeft(r.due_date); return d !== null && d <= 100 })
-      const far  = items.filter(r => { const d = getDaysLeft(r.due_date); return d === null || d > 100 })
-      setRfps([...near, ...far])
-      setTotal(count || 0)
-    }
+    // Filter out blank/ref-only cards
+    const filtered = (data || []).filter(r => !isBlankCard(r))
+
+    setRfps(filtered)
+    setNearTotal(nearCount)
+    setTotal(count)
     setLoading(false)
   }
 
@@ -93,7 +157,7 @@ export default function App() {
     if (days <= 7) return 'text-orange-500 font-semibold'
     if (days <= 30) return 'text-green-600 font-medium'
     if (days <= 100) return 'text-green-600'
-    return 'text-gray-400'  // 100+ days — muted, not prominent
+    return 'text-gray-400'
   }
 
   function getCategoryColor(cat) {
@@ -121,16 +185,17 @@ export default function App() {
 
   async function openContactModal(rfp) {
     const name = rfp.contact_name
-    const agency = rfp.agency || rfp.source_name || ''
+    // Use actual agency/department — never fall back to source_name (platform name)
+    const agency = rfp.agency || ''
     const dept = rfp.department || ''
-    const location = agency || dept
+    const displayOrg = agency || dept || 'Washington State Government'
 
-    const googleQuery = [name, location, 'Washington State', 'procurement'].filter(Boolean).join(' ')
-    const linkedinQuery = [name, location, 'Washington'].filter(Boolean).join(' ')
+    const googleQuery = [name, agency || dept, 'Washington State procurement'].filter(Boolean).join(' ')
+    const linkedinQuery = [name, agency || dept, 'Washington'].filter(Boolean).join(' ')
 
     setContactModal({
       name,
-      agency,
+      agency: displayOrg,
       department: dept || null,
       email: rfp.contact_email || null,
       googleUrl: 'https://www.google.com/search?q=' + encodeURIComponent(googleQuery),
@@ -140,11 +205,10 @@ export default function App() {
     setContactLoading(true)
 
     try {
-      // Calls our own Vercel serverless function — API key stays on the server
       const res = await fetch('/api/contact', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, agency })
+        body: JSON.stringify({ name, agency, department: dept })
       })
       if (!res.ok) throw new Error('Failed')
       const parsed = await res.json()
@@ -160,6 +224,7 @@ export default function App() {
   }
 
   const totalPages = Math.ceil(total / PER_PAGE)
+  const nearPages = Math.ceil(nearTotal / PER_PAGE)
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -183,7 +248,7 @@ export default function App() {
                   <div className="text-4xl mb-3">📂</div>
                   <p className="text-gray-500 text-sm mb-4">No documents were scraped for this bid.</p>
                   {docsModal.detailUrl && (
-                    <a href={docsModal.detailUrl + '?t=BidDocuments'} target="_blank" rel="noopener noreferrer" style={{ backgroundColor: '#EE0000' }} className="inline-block text-white text-sm font-semibold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
+                    <a href={docsModal.detailUrl + '?t=BidDocuments'} target="_blank" rel="noopener noreferrer" style={{ backgroundColor: '#EE0000' }} className="inline-block text-white text-sm font-semibold px-4 py-2 rounded-lg hover:opacity-90">
                       View Documents on Procureware →
                     </a>
                   )}
@@ -193,7 +258,7 @@ export default function App() {
                   <p className="text-xs text-gray-400 uppercase tracking-wide font-semibold mb-3">{docsModal.documents.length} document{docsModal.documents.length !== 1 ? 's' : ''} available</p>
                   {docsModal.documents.map((doc, i) => (
                     <a key={i} href={doc.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 p-3 rounded-lg border border-gray-200 hover:border-red-300 hover:bg-red-50 transition-all group">
-                      <div className="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0 group-hover:bg-red-100 transition-colors">
+                      <div className="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0 group-hover:bg-red-100">
                         <svg className="w-4 h-4 text-gray-500 group-hover:text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
                       </div>
                       <span className="text-sm text-gray-700 group-hover:text-red-700 font-medium flex-1 truncate">{doc.name}</span>
@@ -216,8 +281,6 @@ export default function App() {
       {contactModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(0,0,0,0.6)' }} onClick={() => setContactModal(null)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden" onClick={e => e.stopPropagation()}>
-
-            {/* Header */}
             <div className="flex items-start justify-between p-6 border-b border-gray-100">
               <div>
                 <p className="text-xs text-gray-400 uppercase tracking-wide font-semibold mb-1">Procurement Contact</p>
@@ -229,14 +292,11 @@ export default function App() {
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
               </button>
             </div>
-
             <div className="p-6 space-y-4">
-
-              {/* AI lookup results */}
               {contactLoading ? (
                 <div className="flex items-center gap-3 p-4 bg-gray-50 rounded-xl">
                   <div className="w-5 h-5 border-2 border-red-500 border-t-transparent rounded-full animate-spin flex-shrink-0"></div>
-                  <p className="text-sm text-gray-500">Looking up contact info...</p>
+                  <p className="text-sm text-gray-500">Searching for contact info...</p>
                 </div>
               ) : contactInfo && !contactInfo._error ? (
                 <div className="space-y-2">
@@ -246,27 +306,26 @@ export default function App() {
                       <div><p className="text-xs text-gray-400">Title</p><p className="text-sm font-medium text-gray-800">{contactInfo.title}</p></div>
                     </div>
                   )}
-                  {contactInfo.email && contactInfo.email !== 'null' && contactInfo.email !== null && (
+                  {contactInfo.email && contactInfo.email !== 'null' && (
                     <a href={'mailto:' + contactInfo.email} className="flex items-center gap-3 p-3 bg-gray-50 hover:bg-red-50 rounded-xl transition-colors group">
                       <span className="text-lg">📧</span>
                       <div><p className="text-xs text-gray-400">Email</p><p className="text-sm font-medium text-red-600 group-hover:underline">{contactInfo.email}</p></div>
                     </a>
                   )}
-                  {contactInfo.phone && contactInfo.phone !== 'null' && contactInfo.phone !== null && (
+                  {contactInfo.phone && contactInfo.phone !== 'null' && (
                     <a href={'tel:' + contactInfo.phone} className="flex items-center gap-3 p-3 bg-gray-50 hover:bg-red-50 rounded-xl transition-colors group">
                       <span className="text-lg">📞</span>
                       <div><p className="text-xs text-gray-400">Phone</p><p className="text-sm font-medium text-red-600 group-hover:underline">{contactInfo.phone}</p></div>
                     </a>
                   )}
-                  {!contactInfo.email && !contactInfo.phone && (
-                    <p className="text-xs text-gray-400 text-center py-2">No contact details found — try searching below</p>
+                  {!contactInfo.email && !contactInfo.phone && !contactInfo.title && (
+                    <p className="text-xs text-gray-400 text-center py-2 bg-gray-50 rounded-xl p-3">No details found automatically — try searching below</p>
                   )}
                 </div>
               ) : contactInfo?._error ? (
-                <p className="text-xs text-gray-400 text-center py-2 bg-gray-50 rounded-xl p-3">Could not auto-fetch details — use the search buttons below</p>
+                <p className="text-xs text-gray-400 text-center py-2 bg-gray-50 rounded-xl p-3">Could not load contact details — use the search buttons below</p>
               ) : null}
 
-              {/* Always show Google + LinkedIn */}
               <div>
                 <p className="text-xs text-gray-400 mb-2 text-center">Search manually</p>
                 <div className="grid grid-cols-2 gap-3">
@@ -282,7 +341,6 @@ export default function App() {
                   </a>
                 </div>
               </div>
-
             </div>
           </div>
         </div>
@@ -428,6 +486,7 @@ export default function App() {
               <p className="text-sm text-gray-500">
                 Showing <span className="font-semibold text-gray-900">{((page - 1) * PER_PAGE) + 1}</span>–<span className="font-semibold text-gray-900">{Math.min(page * PER_PAGE, total)}</span> of <span className="font-semibold text-gray-900">{total}</span> results
                 {category !== 'All' && <span className="ml-2 text-red-600 font-medium">in {category}</span>}
+                {page > nearPages && nearPages > 0 && <span className="ml-2 text-gray-400 text-xs">(far-out RFPs — due 100+ days)</span>}
               </p>
             </div>
 
@@ -439,10 +498,7 @@ export default function App() {
                 const isFarOut = daysLeft !== null && daysLeft > 100
 
                 return (
-                  <div
-                    key={rfp.id}
-                    className={"bg-white rounded-xl border p-5 hover:shadow-md transition-all group " + (isFarOut ? "border-gray-100 opacity-80" : "border-gray-200 hover:border-red-300")}
-                  >
+                  <div key={rfp.id} className={"bg-white rounded-xl border p-5 hover:shadow-md transition-all group " + (isFarOut ? "border-gray-100 opacity-75" : "border-gray-200 hover:border-red-300")}>
                     <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-2 flex-wrap">
