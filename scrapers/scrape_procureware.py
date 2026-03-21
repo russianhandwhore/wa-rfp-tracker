@@ -1,19 +1,20 @@
 """
 Procureware Bid Portal Scraper
-Covers: City of Spokane, Snohomish County, Community Transit, Grant County PUD
-Strategy: Plain HTML pages — no JavaScript required.
-Uses requests + BeautifulSoup, no Playwright needed (faster, lighter).
+Covers: City of Spokane, Snohomish County, Community Transit
+Strategy: Procureware is a .NET JavaScript SPA. Playwright renders the page
+fully (wait_until="networkidle"), then BeautifulSoup parses the loaded DOM.
+Bid links follow the pattern: /Bids/{guid}
 """
 
-import requests
-from bs4 import BeautifulSoup
+import asyncio
+import re
 from datetime import datetime
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from utils import get_supabase_client, generate_fingerprint, log_scrape, clean_text
+from bs4 import BeautifulSoup
 
-# All WA Procureware portals — add more here as needed
 PORTALS = [
     {
         "name": "City of Spokane",
@@ -34,19 +35,13 @@ PORTALS = [
 
 SOURCE_NAME = "Procureware Bid Portal"
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-}
+# Matches a GUID: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+GUID_PATTERN = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
 
 
 def parse_date(date_str):
-    """Parse common date formats found on Procureware pages."""
     if not date_str:
         return None
     date_str = date_str.strip()
@@ -58,67 +53,35 @@ def parse_date(date_str):
     return None
 
 
-def scrape_portal(portal):
+def parse_rfps_from_html(html, portal):
     """
-    Scrape a single Procureware portal.
-    Procureware uses standard paginated HTML tables — no JavaScript needed.
+    Parse rendered Procureware HTML. Bid detail URLs contain a GUID,
+    e.g. /Bids/2132eb6b-2db4-4ecd-be5f-e37e957cc72b
+    We find all links matching that pattern to locate individual bids.
     """
     rfps = []
-    session = requests.Session()
-    session.headers.update(HEADERS)
+    soup = BeautifulSoup(html, "lxml")
 
-    print(f"Loading {portal['name']} bids page...")
-    try:
-        resp = session.get(portal["url"], timeout=30)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"  Error loading {portal['url']}: {e}")
-        return rfps
+    # Find all links whose href contains a GUID (bid detail pages)
+    bid_links = [
+        a for a in soup.find_all("a", href=True)
+        if GUID_PATTERN.search(a["href"]) and "/Bids/" in a["href"]
+    ]
 
-    soup = BeautifulSoup(resp.text, "lxml")
+    print(f"  Found {len(bid_links)} bid detail links")
 
-    # Debug: show page title to confirm we loaded the right page
-    title_tag = soup.find("title")
-    print(f"  Page title: {title_tag.get_text()[:80] if title_tag else 'N/A'}")
+    # Debug: show first few links found
+    for a in bid_links[:3]:
+        print(f"    Link text: '{a.get_text(strip=True)[:60]}' -> {a['href'][:80]}")
 
-    # Procureware typically lists bids in a table or a list of div cards.
-    # We look for both patterns.
-
-    # Pattern 1: Table rows with bid links
-    bid_rows = soup.find_all("tr", class_=lambda c: c and "bid" in c.lower())
-    if not bid_rows:
-        # Pattern 2: Any table row containing a link to a bid detail page
-        all_rows = soup.find_all("tr")
-        bid_rows = [
-            r for r in all_rows
-            if r.find("a", href=lambda h: h and ("bid" in h.lower() or "detail" in h.lower()))
-        ]
-
-    # Pattern 3: Div-based listings
-    if not bid_rows:
-        bid_rows = soup.find_all("div", class_=lambda c: c and any(
-            kw in c.lower() for kw in ("bid", "solicitation", "opportunity", "project")
-        ))
-
-    print(f"  Found {len(bid_rows)} bid rows/cards")
-
-    # If no rows found at all, dump a snippet for debugging
-    if not bid_rows:
-        print("  WARNING: No bid listings found. Page snippet:")
-        print(resp.text[:1000])
-        return rfps
-
-    for row in bid_rows:
-        # Extract the title and detail link
-        link = row.find("a", href=True)
-        if not link:
-            continue
-
-        title = clean_text(link.get_text())
-        if not title or len(title) < 5:
-            continue
-
+    seen_hrefs = set()
+    for link in bid_links:
         href = link["href"]
+        if href in seen_hrefs:
+            continue
+        seen_hrefs.add(href)
+
+        # Build absolute URL
         if href.startswith("http"):
             detail_url = href
         elif href.startswith("/"):
@@ -126,27 +89,41 @@ def scrape_portal(portal):
         else:
             detail_url = portal["base_url"] + "/" + href
 
-        # Extract all cell/div text values for the row
-        cells = row.find_all(["td", "div"])
-        cell_texts = [clean_text(c.get_text()) for c in cells if clean_text(c.get_text())]
+        # Get the title from the link text or nearest heading
+        title = clean_text(link.get_text())
+        if not title or len(title) < 5:
+            # Look in the parent container for a heading
+            parent = link.find_parent(["tr", "div", "li", "article"])
+            if parent:
+                heading = parent.find(["h1", "h2", "h3", "h4", "strong", "b"])
+                if heading:
+                    title = clean_text(heading.get_text())
 
-        # Try to find a due date among cell texts
+        if not title or len(title) < 5:
+            continue
+
+        # Look for dates in the surrounding row/card
+        container = link.find_parent(["tr", "div", "li"]) or link
+        container_text = container.get_text(" ", strip=True)
+
         due_date = None
-        for text in cell_texts:
-            # Look for date patterns like 04/15/2026 or April 15, 2026
-            import re
-            date_match = re.search(
-                r"\b(\d{1,2}/\d{1,2}/\d{2,4}|\w+ \d{1,2},?\s*\d{4})\b", text
-            )
-            if date_match:
-                due_date = parse_date(date_match.group(1))
-                if due_date:
-                    break
+        date_match = re.search(
+            r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b", container_text
+        )
+        if date_match:
+            due_date = parse_date(date_match.group(1))
 
-        # Try to find a ref/bid number
+        # Look for a ref/bid number (short alphanumeric, not the title, not a date)
         ref_number = None
-        for text in cell_texts:
-            if re.match(r"^[\w\-]{3,20}$", text) and text != title:
+        for cell in (container.find_all("td") or container.find_all("span")):
+            text = clean_text(cell.get_text())
+            if (
+                text and text != title and
+                len(text) < 30 and
+                not re.search(r"\s{2,}", text) and
+                re.match(r"^[\w\-\.]{3,25}$", text) and
+                not re.match(r"^\d{1,2}/\d{1,2}/\d{2,4}$", text)
+            ):
                 ref_number = text
                 break
 
@@ -172,6 +149,42 @@ def scrape_portal(portal):
     return rfps
 
 
+async def scrape_portal(portal):
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        )
+        page = await context.new_page()
+
+        print(f"  Loading {portal['name']}...")
+        try:
+            # networkidle ensures all AJAX calls have completed before we capture HTML
+            await page.goto(portal["url"], timeout=60000, wait_until="networkidle")
+        except Exception as e:
+            print(f"  Warning during navigation: {e}")
+
+        # Extra buffer in case of slow AJAX rendering
+        await asyncio.sleep(4)
+
+        html = await page.content()
+
+        # Debug: show a snippet of the rendered page body text
+        from bs4 import BeautifulSoup as BS
+        preview = BS(html, "lxml").get_text(" ", strip=True)[:300]
+        print(f"  Page preview: {preview}")
+
+        await browser.close()
+
+    return parse_rfps_from_html(html, portal)
+
+
 def run():
     print(f"Starting Procureware scraper at {datetime.now()}")
     supabase = get_supabase_client()
@@ -182,15 +195,8 @@ def run():
     try:
         for portal in PORTALS:
             print(f"\n--- Scraping {portal['name']} ---")
-            rfps = scrape_portal(portal)
-            print(f"Found {len(rfps)} RFPs for {portal['name']}")
+            rfps = asyncio.run(scrape_portal(portal))
 
-            if rfps:
-                sample = rfps[0]
-                print(f"  Sample title:   {sample.get('title', '')[:60]}")
-                print(f"  Sample due:     {sample.get('due_date')}")
-
-            # Generate fingerprints
             for rfp in rfps:
                 rfp["fingerprint"] = generate_fingerprint(
                     rfp.get("title", ""),
@@ -198,17 +204,20 @@ def run():
                     rfp.get("due_date", "")
                 )
 
+            print(f"  Found {len(rfps)} RFPs for {portal['name']}")
+            if rfps:
+                print(f"  Sample: {rfps[0].get('title', '')[:60]}")
+
             all_rfps.extend(rfps)
 
         print(f"\nTotal Procureware RFPs: {len(all_rfps)}")
 
         if all_rfps:
-            batch_size = 50
-            for i in range(0, len(all_rfps), batch_size):
-                batch = all_rfps[i:i + batch_size]
+            for i in range(0, len(all_rfps), 50):
+                batch = all_rfps[i:i + 50]
                 supabase.table("rfps").upsert(batch, on_conflict="fingerprint").execute()
                 total_saved += len(batch)
-                print(f"Saved batch of {len(batch)} RFPs")
+                print(f"Saved batch of {len(batch)}")
 
         status = "success"
         print(f"Done! {total_saved} RFPs saved")
