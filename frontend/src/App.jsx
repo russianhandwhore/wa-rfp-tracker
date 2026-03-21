@@ -154,7 +154,7 @@ export default function App() {
               >
                 Browse Active RFPs
               </button>
-              
+              <a
                 href="#"
                 className="text-white font-semibold px-8 py-4 rounded-lg border border-gray-600 hover:border-gray-400 transition-colors text-lg text-center"
               >
