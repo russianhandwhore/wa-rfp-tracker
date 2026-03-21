@@ -166,7 +166,7 @@ export default function App() {
                           )}
                         </div>
                         {rfp.detail_url && (
-                          
+                          <a 
                             href={rfp.detail_url}
                             target="_blank"
                             rel="noopener noreferrer"
