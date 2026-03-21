@@ -3,6 +3,8 @@ from playwright.async_api import async_playwright
 from datetime import datetime
 import sys
 import os
+import requests
+from bs4 import BeautifulSoup
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from utils import get_supabase_client, generate_fingerprint, log_scrape, clean_text
 import re
@@ -20,8 +22,64 @@ def parse_due_date(date_str):
         return None
 
 
+def fetch_detail_page(detail_url):
+    try:
+        response = requests.get(detail_url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }, timeout=15)
+        soup = BeautifulSoup(response.text, "lxml")
+
+        description = None
+        agency = None
+        rfp_type = None
+
+        tables = soup.find_all("table")
+        for table in tables:
+            rows = table.find_all("tr")
+            for row in rows:
+                cells = row.find_all("td")
+                if len(cells) >= 2:
+                    label = clean_text(cells[0].get_text())
+                    value = clean_text(cells[1].get_text())
+                    if not label or not value:
+                        continue
+                    if "organization" in label.lower() or "agency" in label.lower():
+                        agency = value
+                    if "type" in label.lower() and not rfp_type:
+                        rfp_type = value
+                    if "description" in label.lower() or "scope" in label.lower():
+                        description = value
+
+        if not description:
+            content_div = soup.find("div", {"id": "ContentPlaceHolder1_lblDescription"})
+            if content_div:
+                description = clean_text(content_div.get_text())
+
+        if not description:
+            all_text_blocks = []
+            for p in soup.find_all(["p", "div", "span"]):
+                text = clean_text(p.get_text())
+                if text and len(text) > 50 and "javascript" not in text.lower():
+                    all_text_blocks.append(text)
+            if all_text_blocks:
+                description = max(all_text_blocks, key=len)
+
+        if description and len(description) > 800:
+            sentences = description.split(". ")
+            description = ". ".join(sentences[:4]) + "."
+
+        return {
+            "description": description,
+            "agency": agency,
+            "rfp_type": rfp_type
+        }
+
+    except Exception as e:
+        print("Error fetching detail page " + str(detail_url) + ": " + str(e))
+        return {"description": None, "agency": None, "rfp_type": None}
+
+
 def parse_rfps_from_html(html):
-    from bs4 import BeautifulSoup
     rfps = []
     soup = BeautifulSoup(html, "lxml")
     grid = soup.find("table", {"id": "DataGrid1"})
@@ -71,6 +129,7 @@ def parse_rfps_from_html(html):
                 "status": "active",
                 "agency": None,
                 "description": None,
+                "rfp_type": None,
                 "includes_inclusion_plan": False
             }
 
@@ -98,7 +157,6 @@ def deduplicate(rfps):
 
 
 def get_next_page_control(html, next_page_num):
-    from bs4 import BeautifulSoup
     soup = BeautifulSoup(html, "lxml")
     pagination = soup.find("td", {"align": "center"})
     if not pagination:
@@ -193,16 +251,41 @@ def run():
         all_rfps = deduplicate(all_rfps)
         print("Total after dedup: " + str(len(all_rfps)))
 
-        if all_rfps:
+        existing = supabase.table("rfps").select("fingerprint").eq("source_platform", "WEBS").execute()
+        existing_fps = set(row["fingerprint"] for row in existing.data)
+        print("Existing RFPs in DB: " + str(len(existing_fps)))
+
+        new_rfps = [r for r in all_rfps if r["fingerprint"] not in existing_fps]
+        print("New RFPs to fetch details for: " + str(len(new_rfps)))
+
+        for i, rfp in enumerate(new_rfps):
+            print("Fetching details " + str(i+1) + "/" + str(len(new_rfps)) + ": " + rfp["title"][:50])
+            details = fetch_detail_page(rfp["detail_url"])
+            if details["description"] and not rfp.get("description"):
+                rfp["description"] = details["description"]
+            if details["agency"] and not rfp.get("agency"):
+                rfp["agency"] = details["agency"]
+            if details["rfp_type"]:
+                rfp["rfp_type"] = details["rfp_type"]
+
+        if new_rfps:
             batch_size = 50
-            for i in range(0, len(all_rfps), batch_size):
-                batch = all_rfps[i:i + batch_size]
+            for i in range(0, len(new_rfps), batch_size):
+                batch = new_rfps[i:i + batch_size]
                 supabase.table("rfps").upsert(batch, on_conflict="fingerprint").execute()
                 total_new += len(batch)
                 print("Saved batch of " + str(len(batch)) + " RFPs")
 
+        updated_rfps = [r for r in all_rfps if r["fingerprint"] in existing_fps]
+        if updated_rfps:
+            batch_size = 50
+            for i in range(0, len(updated_rfps), batch_size):
+                batch = updated_rfps[i:i + batch_size]
+                supabase.table("rfps").upsert(batch, on_conflict="fingerprint").execute()
+            print("Updated " + str(len(updated_rfps)) + " existing RFPs")
+
         status = "success"
-        print("Done! " + str(total_new) + " RFPs saved")
+        print("Done! " + str(total_new) + " new RFPs saved")
 
     except Exception as e:
         error_msg = str(e)
