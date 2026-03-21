@@ -2,11 +2,10 @@
 Procureware Bid Portal Scraper
 Covers: City of Spokane, Snohomish County, Community Transit
 
-Fixes:
-- Uses dateutil.parser for robust multi-format date parsing
-- Clicks the "Open Bids" tab (or equivalent) before scraping
-  so we only see active bids, not the full historical archive
-- Falls back gracefully if no Open tab found
+Key fixes from log analysis:
+- Filter by STATUS text ("Open for Bidding", "Available") — reliable and visible
+- Use the LAST date in the container as the due date (posted date comes first)
+- Spokane/Community Transit have no dates visible — status filter handles them
 """
 
 import asyncio
@@ -45,7 +44,9 @@ GUID_PATTERN = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 
-# Noise words to strip before passing to dateutil
+# Status text that means a bid is currently open
+OPEN_STATUSES = {"open for bidding", "available", "open", "active", "accepting submissions"}
+
 DATE_NOISE = re.compile(
     r"\(in \d+ days?\)|\(overdue\)|\(today\)|due|open|close[sd]?|deadline|by",
     re.IGNORECASE
@@ -53,36 +54,43 @@ DATE_NOISE = re.compile(
 
 
 def parse_date_robust(raw_text):
-    """
-    Robust date parsing using dateutil.
-    Strips noise words, then lets dateutil handle any format.
-    Returns ISO string or None.
-    """
+    """Use dateutil to parse any date format after stripping noise words."""
     if not raw_text:
         return None
-
-    # Strip noise words like "Due", "(in 17 days)", "Closes", etc.
     cleaned = DATE_NOISE.sub("", raw_text).strip(" ,:-")
-
-    # Remove time-zone abbreviations that confuse dateutil (e.g. "PT", "PST", "PDT")
     cleaned = re.sub(r"\b(PT|PST|PDT|MT|MST|MDT|CT|CST|CDT|ET|EST|EDT)\b", "", cleaned).strip()
-
     if not cleaned:
         return None
-
     try:
-        dt = dateutil_parser.parse(cleaned, fuzzy=True)
+        dt = dateutil_parser.parse(cleaned, fuzzy=False)
         return dt.isoformat()
     except Exception:
         return None
 
 
+def extract_all_dates(container_text):
+    """
+    Find ALL date strings in the container text and return them as parsed ISO strings.
+    We return all of them so the caller can pick the right one (usually the last = due date).
+    """
+    dates = []
+    # Match MM/DD/YYYY HH:MM AM/PM patterns (with optional time)
+    pattern = re.compile(r"\b(\d{1,2}/\d{1,2}/\d{4})(?:\s+\d{1,2}:\d{2}\s*(?:AM|PM))?\b")
+    for m in pattern.finditer(container_text):
+        parsed = parse_date_robust(m.group(1))
+        if parsed:
+            dates.append(parsed)
+    return dates
+
+
+def is_open_status(container_text):
+    """Check if the container text contains a known open/active status phrase."""
+    text_lower = container_text.lower()
+    return any(status in text_lower for status in OPEN_STATUSES)
+
+
 def is_future(date_iso):
-    """
-    Return True if the date is today or in the future.
-    Returns True if date is None — better to show a bid with unknown date
-    than silently drop it.
-    """
+    """Return True if date is today or future. Returns True if None."""
     if not date_iso:
         return True
     try:
@@ -94,37 +102,8 @@ def is_future(date_iso):
         return True
 
 
-def extract_date_from_container(container_text):
-    """
-    Pull out the most date-like substring from a container, then parse it.
-    Tries specific patterns first, then falls back to dateutil fuzzy parsing.
-    """
-    # Pattern 1: MM/DD/YYYY or MM/DD/YY (most common on Procureware)
-    m = re.search(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b", container_text)
-    if m:
-        result = parse_date_robust(m.group(1))
-        if result:
-            return result
-
-    # Pattern 2: Month DD, YYYY  e.g. "March 25, 2026"
-    m = re.search(r"\b([A-Z][a-z]+ \d{1,2},?\s*\d{4})\b", container_text)
-    if m:
-        result = parse_date_robust(m.group(1))
-        if result:
-            return result
-
-    # Pattern 3: YYYY-MM-DD
-    m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", container_text)
-    if m:
-        result = parse_date_robust(m.group(1))
-        if result:
-            return result
-
-    return None
-
-
 def parse_listing_page(html, portal):
-    """Parse the rendered listing page HTML into minimal bid entries."""
+    """Parse rendered listing HTML into bid entries."""
     entries = []
     soup = BeautifulSoup(html, "lxml")
 
@@ -133,16 +112,11 @@ def parse_listing_page(html, portal):
         if GUID_PATTERN.search(a["href"]) and "/Bids/" in a["href"]
     ]
 
-    print(f"  Found {len(bid_links)} bid links")
-
-    # Show raw container text for first 3 bids so we can see the date format
-    print("  === RAW CONTAINER SAMPLE (first 3) ===")
-    for link in bid_links[:3]:
-        container = link.find_parent(["tr", "div", "li"]) or link
-        print(f"  {container.get_text(' | ', strip=True)[:200]}")
-    print("  ===")
+    print(f"  Found {len(bid_links)} total bid links")
 
     seen = set()
+    open_count = 0
+
     for link in bid_links:
         href = link["href"]
         if href in seen:
@@ -157,54 +131,36 @@ def parse_listing_page(html, portal):
         ref_number = clean_text(link.get_text()) or None
         container = link.find_parent(["tr", "div", "li"]) or link
         container_text = container.get_text(" ", strip=True)
-        due_date = extract_date_from_container(container_text)
+
+        # PRIMARY FILTER: only include bids with an open status
+        if not is_open_status(container_text):
+            continue
+
+        open_count += 1
+
+        # Get all dates — use the LAST one as the due date
+        # (posted/published date comes first, due date comes last)
+        all_dates = extract_all_dates(container_text)
+        due_date = all_dates[-1] if all_dates else None
 
         entries.append({
             "ref_number": ref_number,
             "detail_url": detail_url,
             "due_date": due_date,
+            "container_text": container_text,  # keep for debugging
         })
 
+    print(f"  {open_count} open/active bids found")
+
+    # Debug: show first 3 open entries
+    for e in entries[:3]:
+        print(f"    ref={e['ref_number']} due={e['due_date']} status=open")
+
+    # Strip debug field before returning
+    for e in entries:
+        e.pop("container_text", None)
+
     return entries
-
-
-async def try_click_open_tab(page):
-    """
-    Try to click an 'Open', 'Active', or 'Current' filter tab on the
-    Procureware bids page. Returns True if a tab was clicked.
-    """
-    # Common tab/button labels for open bids on Procureware
-    open_labels = ["Open", "Active", "Current", "Open Bids", "Active Bids"]
-
-    for label in open_labels:
-        try:
-            # Look for buttons, tabs, or links with these labels
-            el = page.get_by_role("tab", name=re.compile(label, re.I))
-            if await el.count() > 0:
-                await el.first.click()
-                await asyncio.sleep(2)
-                print(f"  Clicked '{label}' tab")
-                return True
-
-            el = page.get_by_role("button", name=re.compile(label, re.I))
-            if await el.count() > 0:
-                await el.first.click()
-                await asyncio.sleep(2)
-                print(f"  Clicked '{label}' button")
-                return True
-
-            el = page.get_by_role("link", name=re.compile(f"^{label}$", re.I))
-            if await el.count() > 0:
-                await el.first.click()
-                await asyncio.sleep(2)
-                print(f"  Clicked '{label}' link")
-                return True
-
-        except Exception:
-            continue
-
-    print("  No Open/Active tab found — scraping all visible bids")
-    return False
 
 
 async def fetch_detail(page, entry, portal, semaphore):
@@ -223,15 +179,18 @@ async def fetch_detail(page, entry, portal, semaphore):
             html = await page.content()
             soup = BeautifulSoup(html, "lxml")
 
-            # Extract real title
-            for selector in ["h2", "h3", ".bid-title", ".project-title", "[class*='title']"]:
+            # Extract real title from headings
+            skip_titles = {
+                "bids", "home", "documents", "activities",
+                "city of spokane procurement",
+                "snohomish county purchasing portal",
+                "community transit procurement"
+            }
+            for selector in ["h2", "h3", ".bid-title", "[class*='title']"]:
                 tag = soup.select_one(selector)
                 if tag:
                     text = clean_text(tag.get_text())
-                    if text and len(text) > 5 and text not in (
-                        "Bids", "Home", "Documents", "Activities", "City of Spokane Procurement",
-                        "Snohomish County Purchasing Portal", "Community Transit Procurement"
-                    ):
+                    if text and len(text) > 5 and text.lower() not in skip_titles:
                         title = text
                         break
 
@@ -258,7 +217,7 @@ async def fetch_detail(page, entry, portal, semaphore):
                 )
                 documents.append({"name": doc_name, "url": doc_url})
 
-            # Fallback: look for PDF/Word/ZIP file links
+            # Fallback: look for PDF/Word/ZIP links
             if not documents:
                 for a in soup.find_all("a", href=re.compile(r"\.(pdf|docx?|xlsx?|zip)($|\?)", re.I)):
                     href = a["href"]
@@ -266,7 +225,7 @@ async def fetch_detail(page, entry, portal, semaphore):
                     url = href if href.startswith("http") else portal["base_url"] + href
                     documents.append({"name": name, "url": url})
 
-            print(f"    {entry.get('ref_number','?')}: '{title[:40]}' | {len(documents)} docs")
+            print(f"    {entry.get('ref_number','?')}: '{title[:50]}' | {len(documents)} docs")
 
         except Exception as e:
             print(f"    Error on {detail_url}: {e}")
@@ -289,51 +248,34 @@ async def scrape_portal(portal):
             )
         )
 
-        # Step 1: Load listing page and try to filter to open bids
+        # Load listing page
         listing_page = await context.new_page()
         print(f"  Loading {portal['name']}...")
         try:
             await listing_page.goto(portal["url"], timeout=60000, wait_until="networkidle")
         except Exception as e:
             print(f"  Warning: {e}")
-
         await asyncio.sleep(3)
-
-        # Try to click an "Open Bids" tab/button
-        await try_click_open_tab(listing_page)
-
-        # Wait for any re-render after tab click
-        await asyncio.sleep(3)
-
         listing_html = await listing_page.content()
         await listing_page.close()
 
         entries = parse_listing_page(listing_html, portal)
 
-        # Filter to future bids (includes bids with no due date)
-        future_entries = [e for e in entries if is_future(e.get("due_date"))]
-        print(f"  {len(future_entries)} future/undated bids out of {len(entries)} total")
-
-        if not future_entries:
-            print("  No active bids found for this portal right now")
+        if not entries:
+            print("  No open bids found for this portal right now")
             await browser.close()
             return all_rfps
 
-        # Step 2: Fetch detail pages in parallel
+        # Fetch detail pages in parallel
         semaphore = asyncio.Semaphore(CONCURRENCY)
         detail_page = await context.new_page()
-
-        tasks = [
-            fetch_detail(detail_page, entry, portal, semaphore)
-            for entry in future_entries
-        ]
+        tasks = [fetch_detail(detail_page, entry, portal, semaphore) for entry in entries]
         details = await asyncio.gather(*tasks)
-
         await detail_page.close()
         await browser.close()
 
-    # Step 3: Build final RFP objects
-    for entry, detail in zip(future_entries, details):
+    # Build final RFP objects
+    for entry, detail in zip(entries, details):
         title = detail.get("title") or entry.get("ref_number") or "Untitled"
         documents = detail.get("documents", [])
 
@@ -377,7 +319,7 @@ def run():
         for portal in PORTALS:
             print(f"\n--- Scraping {portal['name']} ---")
             rfps = asyncio.run(scrape_portal(portal))
-            print(f"  Result: {len(rfps)} active RFPs saved")
+            print(f"  Result: {len(rfps)} active RFPs")
             if rfps:
                 print(f"  Sample: {rfps[0].get('title','')[:60]}")
             all_rfps.extend(rfps)
