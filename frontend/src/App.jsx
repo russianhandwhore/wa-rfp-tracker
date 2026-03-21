@@ -28,13 +28,16 @@ export default function App() {
   const [showExpired, setShowExpired] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [docsModal, setDocsModal] = useState(null)
+  const [contactModal, setContactModal] = useState(null)
+  const [contactInfo, setContactInfo] = useState(null)
+  const [contactLoading, setContactLoading] = useState(false)
 
   useEffect(() => {
     fetchRfps()
   }, [search, platform, page, showExpired, category, sortBy])
 
   useEffect(() => {
-    const handler = (e) => { if (e.key === 'Escape') setDocsModal(null) }
+    const handler = (e) => { if (e.key === 'Escape') { setDocsModal(null); setContactModal(null) } }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [])
@@ -109,6 +112,33 @@ export default function App() {
     setDocsModal({ title: rfp.title, detailUrl: rfp.detail_url, documents: getDocuments(rfp) })
   }
 
+  async function openContactModal(rfp) {
+    setContactModal({ name: rfp.contact_name, agency: rfp.agency || rfp.source_name })
+    setContactInfo(null)
+    setContactLoading(true)
+    try {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 500,
+          messages: [{
+            role: 'user',
+            content: `Find contact information for "${rfp.contact_name}" who works in procurement at "${rfp.agency || rfp.source_name}" in Washington State. Return ONLY a JSON object with these fields (use null if unknown): { "email": "...", "phone": "...", "title": "...", "department": "...", "linkedin": "...", "notes": "..." }. No other text.`
+          }]
+        })
+      })
+      const data = await response.json()
+      const text = data.content?.[0]?.text || '{}'
+      const clean = text.replace(/\`\`\`json|\`\`\`/g, '').trim()
+      setContactInfo(JSON.parse(clean))
+    } catch (e) {
+      setContactInfo({ notes: 'Could not load contact info. Try searching manually.' })
+    }
+    setContactLoading(false)
+  }
+
   function scrollToSearch() {
     document.getElementById('search-section').scrollIntoView({ behavior: 'smooth' })
   }
@@ -170,6 +200,81 @@ export default function App() {
                 <a href={docsModal.detailUrl} target="_blank" rel="noopener noreferrer" className="text-sm text-gray-500 hover:text-red-600 transition-colors">View full bid on Procureware →</a>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+
+      {/* Contact Info Modal */}
+      {contactModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(0,0,0,0.6)' }} onClick={() => setContactModal(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="flex items-start justify-between p-6 border-b border-gray-100">
+              <div>
+                <p className="text-xs text-gray-400 uppercase tracking-wide font-semibold mb-1">Procurement Contact</p>
+                <h2 className="font-bold text-gray-900 text-lg">{contactModal.name}</h2>
+                <p className="text-sm text-gray-500 mt-0.5">{contactModal.agency}</p>
+              </div>
+              <button onClick={() => setContactModal(null)} className="text-gray-400 hover:text-gray-600 transition-colors">
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="p-6">
+              {contactLoading ? (
+                <div className="text-center py-6">
+                  <div className="inline-block w-6 h-6 border-3 border-red-500 border-t-transparent rounded-full animate-spin mb-3" style={{ borderWidth: '3px' }}></div>
+                  <p className="text-sm text-gray-400">Looking up contact info...</p>
+                </div>
+              ) : contactInfo ? (
+                <div className="space-y-3">
+                  {contactInfo.title && (
+                    <div className="flex items-center gap-3">
+                      <span className="text-lg">🏢</span>
+                      <div><p className="text-xs text-gray-400">Title</p><p className="text-sm font-medium text-gray-800">{contactInfo.title}</p></div>
+                    </div>
+                  )}
+                  {contactInfo.department && (
+                    <div className="flex items-center gap-3">
+                      <span className="text-lg">📋</span>
+                      <div><p className="text-xs text-gray-400">Department</p><p className="text-sm font-medium text-gray-800">{contactInfo.department}</p></div>
+                    </div>
+                  )}
+                  {contactInfo.email && (
+                    <div className="flex items-center gap-3">
+                      <span className="text-lg">📧</span>
+                      <div><p className="text-xs text-gray-400">Email</p><a href={"mailto:" + contactInfo.email} className="text-sm font-medium text-red-600 hover:underline">{contactInfo.email}</a></div>
+                    </div>
+                  )}
+                  {contactInfo.phone && (
+                    <div className="flex items-center gap-3">
+                      <span className="text-lg">📞</span>
+                      <div><p className="text-xs text-gray-400">Phone</p><a href={"tel:" + contactInfo.phone} className="text-sm font-medium text-red-600 hover:underline">{contactInfo.phone}</a></div>
+                    </div>
+                  )}
+                  {contactInfo.linkedin && (
+                    <div className="flex items-center gap-3">
+                      <span className="text-lg">💼</span>
+                      <div><p className="text-xs text-gray-400">LinkedIn</p><a href={contactInfo.linkedin} target="_blank" rel="noopener noreferrer" className="text-sm font-medium text-red-600 hover:underline">View Profile</a></div>
+                    </div>
+                  )}
+                  {contactInfo.notes && (
+                    <div className="mt-3 p-3 bg-gray-50 rounded-lg">
+                      <p className="text-xs text-gray-500">{contactInfo.notes}</p>
+                    </div>
+                  )}
+                </div>
+              ) : null}
+              <div className="flex gap-2 mt-5 pt-4 border-t border-gray-100">
+                <a href={"https://www.google.com/search?q=" + encodeURIComponent(contactModal.name + " " + contactModal.agency + " Washington procurement")} target="_blank" rel="noopener noreferrer" className="flex-1 text-center text-xs font-semibold px-3 py-2 rounded-lg border border-gray-300 hover:border-gray-400 text-gray-600 hover:text-gray-800 transition-colors">
+                  🔍 Google
+                </a>
+                <a href={"https://www.linkedin.com/search/results/people/?keywords=" + encodeURIComponent(contactModal.name + " " + contactModal.agency)} target="_blank" rel="noopener noreferrer" className="flex-1 text-center text-xs font-semibold px-3 py-2 rounded-lg border border-gray-300 hover:border-gray-400 text-gray-600 hover:text-gray-800 transition-colors">
+                  💼 LinkedIn
+                </a>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -343,7 +448,18 @@ export default function App() {
                         {rfp.description && <p className="text-gray-500 text-sm leading-relaxed mb-3 line-clamp-2">{rfp.description}</p>}
                         <div className="flex items-center gap-4 text-xs text-gray-400 flex-wrap">
                           {rfp.ref_number && <span><span className="font-medium text-gray-500">Ref:</span> {rfp.ref_number}</span>}
-                          {rfp.contact_name && <span><span className="font-medium text-gray-500">Contact:</span> {rfp.contact_name}</span>}
+                          {rfp.contact_name && (
+                            <button
+                              onClick={() => openContactModal(rfp)}
+                              className="flex items-center gap-1 hover:text-red-600 transition-colors group/contact"
+                            >
+                              <span className="font-medium text-gray-500 group-hover/contact:text-red-500">Contact:</span>
+                              <span className="underline decoration-dotted underline-offset-2">{rfp.contact_name}</span>
+                              <svg className="w-3 h-3 text-gray-300 group-hover/contact:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                              </svg>
+                            </button>
+                          )}
                         </div>
                       </div>
                       <div className="flex flex-row md:flex-col items-center md:items-end gap-3 md:gap-2 md:min-w-36 flex-shrink-0">

@@ -136,16 +136,22 @@ def parse_rfps_from_html(html):
             close_date = parse_due_date(cell_texts[0]) if cell_texts else None
 
             # WEBS has 4 cols: Close Date | Title+Ref | Contact | Additional Data
-            # Contact is second-to-last, "Additional Data" is last
+            # Validate contact looks like a real person name (2 words, short, no Ref#)
+            def looks_like_name(s):
+                if not s or len(s) > 40:
+                    return False
+                if "Ref #" in s or "Additional" in s:
+                    return False
+                if re.match(r'^\d', s):
+                    return False
+                return len(s.strip().split()) >= 2
+
             contact = None
-            if len(cell_texts) >= 3:
-                candidate = cell_texts[-2]
-                if candidate and "Additional" not in candidate and len(candidate) > 2:
+            for candidate in [cell_texts[-2] if len(cell_texts) >= 3 else None,
+                               cell_texts[-1] if len(cell_texts) >= 2 else None]:
+                if looks_like_name(candidate):
                     contact = candidate
-            if not contact and len(cell_texts) >= 2:
-                candidate = cell_texts[-1]
-                if candidate and "Additional" not in candidate and len(candidate) > 2:
-                    contact = candidate
+                    break
 
             current_rfp = {
                 "title": title,
