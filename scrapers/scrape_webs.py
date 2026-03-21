@@ -21,57 +21,6 @@ def parse_due_date(date_str):
         return None
 
 
-def parse_detail_html(html):
-    soup = BeautifulSoup(html, "lxml")
-    description = None
-    agency = None
-    rfp_type = None
-
-    page_text = soup.get_text(separator=" ", strip=True)
-    if "Government organizations go to WEBS" in page_text:
-        return {"description": None, "agency": None, "rfp_type": None}
-
-    tables = soup.find_all("table")
-    for table in tables:
-        rows = table.find_all("tr")
-        for row in rows:
-            cells = row.find_all("td")
-            if len(cells) >= 2:
-                label = clean_text(cells[0].get_text())
-                value = clean_text(cells[1].get_text())
-                if not label or not value:
-                    continue
-                label_lower = label.lower()
-                if "organization" in label_lower or "agency" in label_lower or "government" in label_lower:
-                    agency = value
-                if "type" in label_lower and not rfp_type:
-                    rfp_type = value
-                if "description" in label_lower or "scope" in label_lower or "summary" in label_lower:
-                    description = value
-
-    if not description:
-        for tag in ["ContentPlaceHolder1_lblDescription", "ContentPlaceHolder1_lblSummary"]:
-            div = soup.find(id=tag)
-            if div:
-                description = clean_text(div.get_text())
-                break
-
-    if not description:
-        candidates = []
-        for p in soup.find_all(["p", "td"]):
-            text = clean_text(p.get_text())
-            if text and len(text) > 80 and "javascript" not in text.lower() and "WEBS" not in text:
-                candidates.append(text)
-        if candidates:
-            description = max(candidates, key=len)
-
-    if description and len(description) > 800:
-        sentences = description.split(". ")
-        description = ". ".join(sentences[:4]) + "."
-
-    return {"description": description, "agency": agency, "rfp_type": rfp_type}
-
-
 def parse_rfps_from_html(html):
     rfps = []
     soup = BeautifulSoup(html, "lxml")
@@ -81,7 +30,7 @@ def parse_rfps_from_html(html):
         return rfps
 
     rows = grid.find_all("tr")
-    current_rfp = {}
+    current_rfp = None
 
     for row in rows:
         cells = row.find_all("td")
@@ -90,7 +39,7 @@ def parse_rfps_from_html(html):
 
         link = row.find("a", href=lambda x: x and "Search_BidDetails" in str(x))
         if link:
-            if current_rfp.get("title"):
+            if current_rfp and current_rfp.get("title"):
                 rfps.append(current_rfp)
 
             title = clean_text(link.get_text())
@@ -123,19 +72,47 @@ def parse_rfps_from_html(html):
                 "agency": None,
                 "description": None,
                 "rfp_type": None,
-                "includes_inclusion_plan": False
+                "includes_inclusion_plan": False,
+                "description_lines": []
             }
 
-        elif current_rfp and len(cells) == 1:
-            text = clean_text(cells[0].get_text())
-            if text and not text.startswith("Additional") and not text.startswith("Includes"):
-                if not current_rfp.get("description"):
-                    current_rfp["description"] = text
+        elif current_rfp is not None:
+            row_text = clean_text(row.get_text())
+
             if "Includes an Inclusion Plan: Y" in str(row):
                 current_rfp["includes_inclusion_plan"] = True
 
-    if current_rfp.get("title"):
+            if not row_text:
+                continue
+            if "Includes an Inclusion Plan" in row_text:
+                continue
+            if "Additional Data" in row_text:
+                continue
+            if "Pre-Bid Conference" in row_text:
+                continue
+            if "Deadline for Submitting" in row_text:
+                continue
+            if row_text.startswith("Selective"):
+                continue
+
+            if len(row_text) > 20:
+                current_rfp["description_lines"].append(row_text)
+
+    if current_rfp and current_rfp.get("title"):
         rfps.append(current_rfp)
+
+    for rfp in rfps:
+        lines = rfp.pop("description_lines", [])
+        if lines:
+            full_desc = " ".join(lines)
+            if len(full_desc) > 600:
+                sentences = full_desc.split(". ")
+                full_desc = ". ".join(sentences[:4])
+                if not full_desc.endswith("."):
+                    full_desc += "."
+            rfp["description"] = full_desc
+        else:
+            rfp["description"] = None
 
     return rfps
 
@@ -218,24 +195,6 @@ async def scrape_all_pages():
                 print("Navigation error: " + str(e))
                 break
 
-        print("Now fetching detail pages...")
-        for i, rfp in enumerate(all_rfps):
-            try:
-                print("Detail " + str(i+1) + "/" + str(len(all_rfps)) + ": " + rfp["title"][:50])
-                await page.goto(rfp["detail_url"], timeout=30000, wait_until="domcontentloaded")
-                await asyncio.sleep(0.5)
-                detail_html = await page.content()
-                details = parse_detail_html(detail_html)
-                if details["description"]:
-                    rfp["description"] = details["description"]
-                if details["agency"]:
-                    rfp["agency"] = details["agency"]
-                if details["rfp_type"]:
-                    rfp["rfp_type"] = details["rfp_type"]
-            except Exception as e:
-                print("Error on detail page: " + str(e))
-                continue
-
         await browser.close()
 
     return all_rfps
@@ -261,6 +220,9 @@ def run():
 
         all_rfps = deduplicate(all_rfps)
         print("Total after dedup: " + str(len(all_rfps)))
+
+        has_desc = sum(1 for r in all_rfps if r.get("description"))
+        print("RFPs with descriptions: " + str(has_desc))
 
         if all_rfps:
             batch_size = 50
