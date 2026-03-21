@@ -3,10 +3,10 @@ Procureware Bid Portal Scraper
 Covers: City of Spokane, Snohomish County, Community Transit
 
 Fixes:
-1. Only saves bids with a future due date
-2. Visits each detail page in parallel (5 at a time) to get real title + description
-3. Scrapes document download links from the BidDocuments tab
-4. Stores documents in raw_data as {"documents": [{"name": "...", "url": "..."}]}
+- Uses dateutil.parser for robust multi-format date parsing
+- Clicks the "Open Bids" tab (or equivalent) before scraping
+  so we only see active bids, not the full historical archive
+- Falls back gracefully if no Open tab found
 """
 
 import asyncio
@@ -18,6 +18,7 @@ import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from utils import get_supabase_client, generate_fingerprint, log_scrape, clean_text
 from bs4 import BeautifulSoup
+from dateutil import parser as dateutil_parser
 
 PORTALS = [
     {
@@ -38,47 +39,92 @@ PORTALS = [
 ]
 
 SOURCE_NAME = "Procureware Bid Portal"
-
-# Max concurrent detail-page fetches — keeps us polite and avoids timeouts
 CONCURRENCY = 5
 
 GUID_PATTERN = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 
+# Noise words to strip before passing to dateutil
+DATE_NOISE = re.compile(
+    r"\(in \d+ days?\)|\(overdue\)|\(today\)|due|open|close[sd]?|deadline|by",
+    re.IGNORECASE
+)
 
-def parse_date(date_str):
-    if not date_str:
+
+def parse_date_robust(raw_text):
+    """
+    Robust date parsing using dateutil.
+    Strips noise words, then lets dateutil handle any format.
+    Returns ISO string or None.
+    """
+    if not raw_text:
         return None
-    date_str = date_str.strip()
-    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%B %d, %Y", "%b %d, %Y", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(date_str, fmt).isoformat()
-        except ValueError:
-            continue
-    return None
+
+    # Strip noise words like "Due", "(in 17 days)", "Closes", etc.
+    cleaned = DATE_NOISE.sub("", raw_text).strip(" ,:-")
+
+    # Remove time-zone abbreviations that confuse dateutil (e.g. "PT", "PST", "PDT")
+    cleaned = re.sub(r"\b(PT|PST|PDT|MT|MST|MDT|CT|CST|CDT|ET|EST|EDT)\b", "", cleaned).strip()
+
+    if not cleaned:
+        return None
+
+    try:
+        dt = dateutil_parser.parse(cleaned, fuzzy=True)
+        return dt.isoformat()
+    except Exception:
+        return None
 
 
 def is_future(date_iso):
-    """Return True if the ISO date string is in the future."""
+    """
+    Return True if the date is today or in the future.
+    Returns True if date is None — better to show a bid with unknown date
+    than silently drop it.
+    """
     if not date_iso:
-        return False
+        return True
     try:
         dt = datetime.fromisoformat(date_iso)
-        # Make timezone-aware if needed
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return dt > datetime.now(tz=timezone.utc)
+        return dt >= datetime.now(tz=timezone.utc)
     except Exception:
-        return False
+        return True
+
+
+def extract_date_from_container(container_text):
+    """
+    Pull out the most date-like substring from a container, then parse it.
+    Tries specific patterns first, then falls back to dateutil fuzzy parsing.
+    """
+    # Pattern 1: MM/DD/YYYY or MM/DD/YY (most common on Procureware)
+    m = re.search(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b", container_text)
+    if m:
+        result = parse_date_robust(m.group(1))
+        if result:
+            return result
+
+    # Pattern 2: Month DD, YYYY  e.g. "March 25, 2026"
+    m = re.search(r"\b([A-Z][a-z]+ \d{1,2},?\s*\d{4})\b", container_text)
+    if m:
+        result = parse_date_robust(m.group(1))
+        if result:
+            return result
+
+    # Pattern 3: YYYY-MM-DD
+    m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", container_text)
+    if m:
+        result = parse_date_robust(m.group(1))
+        if result:
+            return result
+
+    return None
 
 
 def parse_listing_page(html, portal):
-    """
-    Parse the main /Bids listing page.
-    Returns a list of minimal dicts: {ref_number, detail_url, due_date}
-    Full title/description comes from the detail page.
-    """
+    """Parse the rendered listing page HTML into minimal bid entries."""
     entries = []
     soup = BeautifulSoup(html, "lxml")
 
@@ -87,7 +133,14 @@ def parse_listing_page(html, portal):
         if GUID_PATTERN.search(a["href"]) and "/Bids/" in a["href"]
     ]
 
-    print(f"  Found {len(bid_links)} bid links on listing page")
+    print(f"  Found {len(bid_links)} bid links")
+
+    # Show raw container text for first 3 bids so we can see the date format
+    print("  === RAW CONTAINER SAMPLE (first 3) ===")
+    for link in bid_links[:3]:
+        container = link.find_parent(["tr", "div", "li"]) or link
+        print(f"  {container.get_text(' | ', strip=True)[:200]}")
+    print("  ===")
 
     seen = set()
     for link in bid_links:
@@ -101,16 +154,10 @@ def parse_listing_page(html, portal):
             else portal["base_url"] + (href if href.startswith("/") else "/" + href)
         )
 
-        # The link text is the ref/bid number (e.g. "RFP 6488-26")
         ref_number = clean_text(link.get_text()) or None
-
-        # Look for a due date in the surrounding row
         container = link.find_parent(["tr", "div", "li"]) or link
         container_text = container.get_text(" ", strip=True)
-        due_date = None
-        m = re.search(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b", container_text)
-        if m:
-            due_date = parse_date(m.group(1))
+        due_date = extract_date_from_container(container_text)
 
         entries.append({
             "ref_number": ref_number,
@@ -121,12 +168,47 @@ def parse_listing_page(html, portal):
     return entries
 
 
+async def try_click_open_tab(page):
+    """
+    Try to click an 'Open', 'Active', or 'Current' filter tab on the
+    Procureware bids page. Returns True if a tab was clicked.
+    """
+    # Common tab/button labels for open bids on Procureware
+    open_labels = ["Open", "Active", "Current", "Open Bids", "Active Bids"]
+
+    for label in open_labels:
+        try:
+            # Look for buttons, tabs, or links with these labels
+            el = page.get_by_role("tab", name=re.compile(label, re.I))
+            if await el.count() > 0:
+                await el.first.click()
+                await asyncio.sleep(2)
+                print(f"  Clicked '{label}' tab")
+                return True
+
+            el = page.get_by_role("button", name=re.compile(label, re.I))
+            if await el.count() > 0:
+                await el.first.click()
+                await asyncio.sleep(2)
+                print(f"  Clicked '{label}' button")
+                return True
+
+            el = page.get_by_role("link", name=re.compile(f"^{label}$", re.I))
+            if await el.count() > 0:
+                await el.first.click()
+                await asyncio.sleep(2)
+                print(f"  Clicked '{label}' link")
+                return True
+
+        except Exception:
+            continue
+
+    print("  No Open/Active tab found — scraping all visible bids")
+    return False
+
+
 async def fetch_detail(page, entry, portal, semaphore):
-    """
-    Visit a single bid detail page and extract:
-    - Real title / description
-    - Document list from the BidDocuments tab
-    """
+    """Fetch detail page for real title, description, and document links."""
     async with semaphore:
         detail_url = entry["detail_url"]
         docs_url = detail_url + "?t=BidDocuments"
@@ -136,40 +218,36 @@ async def fetch_detail(page, entry, portal, semaphore):
         documents = []
 
         try:
-            # Load the BidDocuments tab directly
             await page.goto(docs_url, timeout=40000, wait_until="networkidle")
             await asyncio.sleep(3)
             html = await page.content()
             soup = BeautifulSoup(html, "lxml")
 
-            # --- Extract real title ---
-            # Procureware shows bid name in an h2/h3 or a specific element
+            # Extract real title
             for selector in ["h2", "h3", ".bid-title", ".project-title", "[class*='title']"]:
                 tag = soup.select_one(selector)
                 if tag:
                     text = clean_text(tag.get_text())
-                    # Skip navigation/generic headings
-                    if text and len(text) > 5 and text not in ("Bids", "Home", "Documents"):
+                    if text and len(text) > 5 and text not in (
+                        "Bids", "Home", "Documents", "Activities", "City of Spokane Procurement",
+                        "Snohomish County Purchasing Portal", "Community Transit Procurement"
+                    ):
                         title = text
                         break
 
-            # --- Extract description ---
-            for selector in [".bid-description", ".description", "[class*='description']", "p"]:
-                tags = soup.select(selector)
-                for tag in tags:
+            # Extract description
+            for selector in [".bid-description", ".description", "[class*='description']"]:
+                tag = soup.select_one(selector)
+                if tag:
                     text = clean_text(tag.get_text())
                     if text and len(text) > 30:
                         description = text[:600]
                         break
-                if description:
-                    break
 
-            # --- Extract document download links ---
-            # Procureware document links follow: /BidDocument/Download/{guid}
-            # or /Documents/Download/{guid}
+            # Extract document download links
             doc_links = soup.find_all(
                 "a",
-                href=re.compile(r"/(BidDocument|Document)/Download/", re.I)
+                href=re.compile(r"/(BidDocument|Document|File)/Download/", re.I)
             )
             for doc in doc_links:
                 doc_href = doc["href"]
@@ -180,24 +258,20 @@ async def fetch_detail(page, entry, portal, semaphore):
                 )
                 documents.append({"name": doc_name, "url": doc_url})
 
-            # Also look for any PDF/doc links on the page
+            # Fallback: look for PDF/Word/ZIP file links
             if not documents:
-                for a in soup.find_all("a", href=re.compile(r"\.(pdf|docx?|xlsx?|zip)$", re.I)):
+                for a in soup.find_all("a", href=re.compile(r"\.(pdf|docx?|xlsx?|zip)($|\?)", re.I)):
                     href = a["href"]
                     name = clean_text(a.get_text()) or href.split("/")[-1]
                     url = href if href.startswith("http") else portal["base_url"] + href
                     documents.append({"name": name, "url": url})
 
-            print(f"    {entry['ref_number']}: title='{title[:40]}' docs={len(documents)}")
+            print(f"    {entry.get('ref_number','?')}: '{title[:40]}' | {len(documents)} docs")
 
         except Exception as e:
-            print(f"    Error fetching {detail_url}: {e}")
+            print(f"    Error on {detail_url}: {e}")
 
-        return {
-            "title": title,
-            "description": description,
-            "documents": documents,
-        }
+        return {"title": title, "description": description, "documents": documents}
 
 
 async def scrape_portal(portal):
@@ -215,28 +289,37 @@ async def scrape_portal(portal):
             )
         )
 
-        # --- Step 1: Load listing page ---
+        # Step 1: Load listing page and try to filter to open bids
         listing_page = await context.new_page()
-        print(f"  Loading {portal['name']} listing...")
+        print(f"  Loading {portal['name']}...")
         try:
             await listing_page.goto(portal["url"], timeout=60000, wait_until="networkidle")
         except Exception as e:
             print(f"  Warning: {e}")
+
         await asyncio.sleep(3)
+
+        # Try to click an "Open Bids" tab/button
+        await try_click_open_tab(listing_page)
+
+        # Wait for any re-render after tab click
+        await asyncio.sleep(3)
+
         listing_html = await listing_page.content()
         await listing_page.close()
 
         entries = parse_listing_page(listing_html, portal)
 
-        # --- Step 2: Filter to future bids only ---
+        # Filter to future bids (includes bids with no due date)
         future_entries = [e for e in entries if is_future(e.get("due_date"))]
-        print(f"  {len(future_entries)} future bids (out of {len(entries)} total)")
+        print(f"  {len(future_entries)} future/undated bids out of {len(entries)} total")
 
         if not future_entries:
+            print("  No active bids found for this portal right now")
             await browser.close()
             return all_rfps
 
-        # --- Step 3: Fetch detail pages in parallel ---
+        # Step 2: Fetch detail pages in parallel
         semaphore = asyncio.Semaphore(CONCURRENCY)
         detail_page = await context.new_page()
 
@@ -249,7 +332,7 @@ async def scrape_portal(portal):
         await detail_page.close()
         await browser.close()
 
-    # --- Step 4: Merge listing + detail data ---
+    # Step 3: Build final RFP objects
     for entry, detail in zip(future_entries, details):
         title = detail.get("title") or entry.get("ref_number") or "Untitled"
         documents = detail.get("documents", [])
@@ -273,7 +356,6 @@ async def scrape_portal(portal):
             "includes_inclusion_plan": False,
             "raw_data": json.dumps({"documents": documents}) if documents else None,
         }
-
         rfp["fingerprint"] = generate_fingerprint(
             rfp.get("title", ""),
             rfp.get("agency", ""),
@@ -295,10 +377,9 @@ def run():
         for portal in PORTALS:
             print(f"\n--- Scraping {portal['name']} ---")
             rfps = asyncio.run(scrape_portal(portal))
-            print(f"  Saved {len(rfps)} active RFPs for {portal['name']}")
+            print(f"  Result: {len(rfps)} active RFPs saved")
             if rfps:
-                print(f"  Sample title: {rfps[0].get('title', '')[:60]}")
-                print(f"  Sample docs:  {rfps[0].get('raw_data', '')[:80]}")
+                print(f"  Sample: {rfps[0].get('title','')[:60]}")
             all_rfps.extend(rfps)
 
         print(f"\nTotal Procureware RFPs: {len(all_rfps)}")
