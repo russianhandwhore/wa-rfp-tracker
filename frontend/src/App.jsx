@@ -60,84 +60,34 @@ export default function App() {
   async function fetchRfps() {
     setLoading(true)
 
-    const now = new Date().toISOString()
-    const hundredDaysFromNow = new Date(Date.now() + 100 * 24 * 60 * 60 * 1000).toISOString()
-
-    // Sort column/direction
     const [sortCol, sortDir] =
       sortBy === 'due_date_asc'    ? ['due_date', true] :
       sortBy === 'due_date_desc'   ? ['due_date', false] :
       sortBy === 'created_at_desc' ? ['created_at', false] :
                                      ['created_at', true]
 
-    function applyFilters(q) {
-      if (search) q = q.ilike('title', '%' + search + '%')
-      if (platform !== 'All') q = q.eq('source_platform', platform)
-      if (category !== 'All') q = q.contains('categories', [category])
-      return q
-    }
-
-    // --- Query 1: Near-term RFPs (due within 100 days or no due date) ---
-    // These fill pages 1 through N
-    let nearQuery = supabase
+    let query = supabase
       .from('rfps')
       .select('*', { count: 'exact' })
       .eq('status', 'active')
       .order(sortCol, { ascending: sortDir })
+      .range((page - 1) * PER_PAGE, page * PER_PAGE - 1)
 
-    nearQuery = applyFilters(nearQuery)
+    if (search) query = query.ilike('title', '%' + search + '%')
+    if (platform !== 'All') query = query.eq('source_platform', platform)
+    if (category !== 'All') query = query.contains('categories', [category])
+    if (!showExpired) query = query.gte('due_date', new Date().toISOString())
 
-    if (!showExpired) {
-      nearQuery = nearQuery.or('due_date.gte.' + now + ',due_date.is.null')
+    const { data, count, error } = await query
+    if (!error) {
+      // Push 100+ day items to end, preserve server order within each group
+      const items = data || []
+      const near = items.filter(r => { const d = getDaysLeft(r.due_date); return d !== null && d <= 100 })
+      const far  = items.filter(r => { const d = getDaysLeft(r.due_date); return d === null || d > 100 })
+      setRfps([...near, ...far])
+      setTotal(count || 0)
+      setNearTotal(0)
     }
-    // Only near-term items (≤100 days) or NULL date
-    nearQuery = nearQuery.or('due_date.lte.' + hundredDaysFromNow + ',due_date.is.null')
-
-    // --- Query 2: Far-out RFPs (due after 100 days) ---
-    // These fill pages N+1 onwards
-    let farQuery = supabase
-      .from('rfps')
-      .select('*', { count: 'exact' })
-      .eq('status', 'active')
-      .gt('due_date', hundredDaysFromNow)
-      .order('due_date', { ascending: true }) // Always soonest first for far items
-
-    farQuery = applyFilters(farQuery)
-
-    // Get near count first to know pagination split
-    const { count: nTotal } = await nearQuery.range(0, 0)
-    const nearCount = nTotal || 0
-    const nearPages = Math.ceil(nearCount / PER_PAGE)
-
-    let data = []
-    let count = 0
-
-    // Get far count for total in all cases
-    const { count: fTotal } = await farQuery.range(0, 0)
-    const farCount = fTotal || 0
-    count = nearCount + farCount
-
-    if (nearPages > 0 && page <= nearPages) {
-      // Fetch from near query
-      const from = (page - 1) * PER_PAGE
-      const to = from + PER_PAGE - 1
-      const { data: d, error } = await nearQuery.range(from, to)
-      if (!error) { data = d || [] }
-    } else {
-      // Fetch from far query (either no near items, or we've passed near pages)
-      const farPage = nearPages > 0 ? page - nearPages : page
-      const from = (farPage - 1) * PER_PAGE
-      const to = from + PER_PAGE - 1
-      const { data: d, error } = await farQuery.range(from, to)
-      if (!error) { data = d || [] }
-    }
-
-    // Filter out blank/ref-only cards
-    const filtered = (data || []).filter(r => !isBlankCard(r))
-
-    setRfps(filtered)
-    setNearTotal(nearCount)
-    setTotal(count)
     setLoading(false)
   }
 
@@ -224,7 +174,6 @@ export default function App() {
   }
 
   const totalPages = Math.ceil(total / PER_PAGE)
-  const nearPages = Math.ceil(nearTotal / PER_PAGE)
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -486,7 +435,6 @@ export default function App() {
               <p className="text-sm text-gray-500">
                 Showing <span className="font-semibold text-gray-900">{((page - 1) * PER_PAGE) + 1}</span>–<span className="font-semibold text-gray-900">{Math.min(page * PER_PAGE, total)}</span> of <span className="font-semibold text-gray-900">{total}</span> results
                 {category !== 'All' && <span className="ml-2 text-red-600 font-medium">in {category}</span>}
-                {page > nearPages && nearPages > 0 && <span className="ml-2 text-gray-400 text-xs">(far-out RFPs — due 100+ days)</span>}
               </p>
             </div>
 
