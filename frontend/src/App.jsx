@@ -60,33 +60,28 @@ export default function App() {
   async function fetchRfps() {
     setLoading(true)
 
-    const [sortCol, sortDir] =
-      sortBy === 'due_date_asc'    ? ['due_date', true] :
-      sortBy === 'due_date_desc'   ? ['due_date', false] :
-      sortBy === 'created_at_desc' ? ['created_at', false] :
-                                     ['created_at', true]
+    const now = new Date().toISOString()
+    const hundredDaysFromNow = new Date(Date.now() + 100 * 24 * 60 * 60 * 1000).toISOString()
 
     let query = supabase
       .from('rfps')
       .select('*', { count: 'exact' })
       .eq('status', 'active')
-      .order(sortCol, { ascending: sortDir })
+      // Only show RFPs due within 100 days from now
+      .gte('due_date', now)
+      .lte('due_date', hundredDaysFromNow)
+      // Sort by due_date descending = most days left first (e.g. 80 days before 70)
+      .order('due_date', { ascending: false })
       .range((page - 1) * PER_PAGE, page * PER_PAGE - 1)
 
     if (search) query = query.ilike('title', '%' + search + '%')
     if (platform !== 'All') query = query.eq('source_platform', platform)
     if (category !== 'All') query = query.contains('categories', [category])
-    if (!showExpired) query = query.gte('due_date', new Date().toISOString())
 
     const { data, count, error } = await query
     if (!error) {
-      // Push 100+ day items to end, preserve server order within each group
-      const items = data || []
-      const near = items.filter(r => { const d = getDaysLeft(r.due_date); return d !== null && d <= 100 })
-      const far  = items.filter(r => { const d = getDaysLeft(r.due_date); return d === null || d > 100 })
-      setRfps([...near, ...far])
+      setRfps(data || [])
       setTotal(count || 0)
-      setNearTotal(0)
     }
     setLoading(false)
   }
