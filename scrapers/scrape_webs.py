@@ -208,8 +208,14 @@ def parse_rfps_from_html(html, page_num=1):
 
                 cell_texts = [clean_text(c.get_text()) for c in cells]
 
-                # Column 0 is always the close date on WEBS
-                current_rfp["due_date"] = parse_due_date(cell_texts[0]) if cell_texts else None
+                # Column 0 contains the close date — extract just the date portion
+                # using regex because get_text() pulls nested content too
+                due_date_raw = None
+                if cell_texts:
+                    date_match = re.match(r'(\d{1,2}/\d{1,2}/\d{2,4})', cell_texts[0].strip())
+                    if date_match:
+                        due_date_raw = date_match.group(1)
+                current_rfp["due_date"] = parse_due_date(due_date_raw)
 
                 # Contact name: second-to-last cell, validated as a real name
                 contact = None
