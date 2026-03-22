@@ -194,6 +194,14 @@ def parse_rfps_from_html(html, page_num=1):
             link = row.find("a", href=lambda x: x and "Search_BidDetails" in str(x))
 
             if link:
+                # Guard: WEBS renders each bid as two consecutive <tr> rows
+                # with the same Search_BidDetails href. If the href matches
+                # the current record's detail_url it is a duplicate header row
+                # — skip it so description lines keep accumulating correctly.
+                this_url = build_detail_url(link.get("href", ""))
+                if current_rfp and current_rfp.get("detail_url") == this_url:
+                    continue
+
                 # Save previous record before starting a new one
                 if current_rfp and current_rfp.get("title"):
                     rfps.append(current_rfp)
@@ -353,8 +361,15 @@ def deduplicate(rfps):
     seen = {}
     for rfp in rfps:
         fp = rfp.get("fingerprint")
-        if fp and fp not in seen:
+        if not fp:
+            continue
+        if fp not in seen:
             seen[fp] = rfp
+        else:
+            # Keep whichever copy has more data — prefer non-null description
+            existing = seen[fp]
+            if not existing.get("description") and rfp.get("description"):
+                seen[fp] = rfp
     return list(seen.values())
 
 
