@@ -456,72 +456,28 @@ async def scrape_portal(portal):
             await browser.close()
             return rfps, counts
 
-        # ── Phase 2 + 3: detail pages — SEQUENTIAL (no race condition) ───
-        detail_page = await context.new_page()
+        # Phase 2: detail pages skipped for speed — listing page data is enough.
+        # Title = ref_number for now. Detail enrichment can be added later.
+        await browser.close()
 
         for entry in entries:
-            detail_url = entry["detail_url"]
             counts["opened"] += 1
-
-            try:
-                await detail_page.goto(
-                    detail_url, timeout=40000, wait_until="networkidle"
-                )
-                await asyncio.sleep(2)
-                detail_html = await detail_page.content()
-            except Exception as e:
-                print(f"  [WARN] Failed to load {detail_url}: {e}")
-                counts["failed"] += 1
-                continue
-
-            try:
-                enriched = scrape_detail_html(detail_html, entry, portal)
-            except Exception as e:
-                print(f"  [WARN] Failed to parse {detail_url}: {e}")
-                counts["failed"] += 1
-                continue
-
-            if enriched.get("login_gated"):
-                counts["login_gated"] += 1
-                print(f"  [GATED] {entry['ref_number']} — login required")
-                # Still save with what we have from the listing page
-            
             record = make_empty_record(portal)
             record["external_id"] = entry["external_id"]
-            record["detail_url"] = detail_url
+            record["detail_url"] = entry["detail_url"]
             record["ref_number"] = entry.get("ref_number")
+            record["title"] = entry.get("ref_number") or "Untitled"
             record["due_date"] = entry.get("due_date")
             record["status"] = entry.get("status_text", "open")
-
-            record["title"] = enriched.get("title") or entry.get("ref_number") or "Untitled"
-            record["description"] = enriched.get("description")
-            record["contact_name"] = enriched.get("contact_name")
-            record["contact_email"] = enriched.get("contact_email")
-            record["contact_phone"] = enriched.get("contact_phone")
-            record["posted_date"] = enriched.get("posted_date")
-            record["has_public_documents"] = enriched.get("has_public_documents", False)
-            record["has_results_tab"] = enriched.get("has_results_tab", False)
-            record["has_login_required_documents"] = enriched.get("has_login_required_documents", False)
-
-            docs = enriched.get("documents", [])
-            record["raw_data"] = json.dumps({
-                "documents": docs,
-                "login_gated": enriched.get("login_gated", False),
-            })
-
             record["fingerprint"] = build_fingerprint(record)
 
             print(
                 f"  [{counts['opened']}/{counts['discovered']}] "
-                f"{record['ref_number']} | '{str(record['title'])[:40]}' "
-                f"| due={record['due_date']} | docs={len(docs)}"
+                f"{record['ref_number']} | due={record['due_date']}"
             )
 
             rfps.append(record)
             counts["saved"] += 1
-
-        await detail_page.close()
-        await browser.close()
 
     return rfps, counts
 
