@@ -138,7 +138,8 @@ def absolute_url(href, base_url):
         return None
     if href.startswith("http"):
         return href
-    return base_url + ("" if href.startswith("/") else "/") + href.lstrip("/")
+    # Ensure exactly one slash between base and path
+    return base_url.rstrip("/") + "/" + href.lstrip("/")
 
 
 def make_empty_record(portal):
