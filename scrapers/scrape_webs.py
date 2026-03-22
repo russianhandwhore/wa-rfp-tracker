@@ -1,4 +1,5 @@
 import asyncio
+import json
 from playwright.async_api import async_playwright
 from datetime import datetime
 import sys
@@ -62,8 +63,8 @@ AGENCY_CODES = {
 def parse_due_date(date_str):
     """
     Parse WEBS close dates. Tries 2-digit year first (most common on WEBS),
-    then 4-digit year as fallback. Raises ValueError explicitly rather than
-    swallowing all exceptions.
+    then 4-digit year as fallback. Only catches ValueError — other exceptions
+    propagate so they are not silently swallowed.
     """
     if not date_str:
         return None
@@ -73,8 +74,7 @@ def parse_due_date(date_str):
             return datetime.strptime(s, fmt).isoformat()
         except ValueError:
             continue
-    # Log unparseable date so we know the format changed
-    print(f"  [WARN] Could not parse date: '{s}'")
+    print(f"  [WARN] Unrecognised date format: '{s}'")
     return None
 
 
@@ -89,20 +89,19 @@ def looks_like_name(s):
         return False
     if re.match(r"^\d", s):
         return False
-    # Must have at least two words (First Last)
     return len(s.strip().split()) >= 2
 
 
 def build_detail_url(href):
     """
     Safely build an absolute URL from a relative href.
-    Handles both '/path' and 'path' forms.
+    Note: these URLs redirect to LoginPage.aspx when not authenticated —
+    we store them for reference only, never scrape their content.
     """
     if not href:
         return None
     if href.startswith("http"):
         return href
-    # Normalise to a single leading slash
     return WEBS_BASE + "/" + href.lstrip("/")
 
 
@@ -139,9 +138,9 @@ def extract_agency_from_description(description):
 
 
 def make_empty_record():
-    """Return a record dict with all schema fields set to safe defaults."""
+    """Return a record dict with all schema fields set to safe defaults.
+    Fields prefixed with _ are internal and stripped before upsert."""
     return {
-        # Required fields
         "title": None,
         "detail_url": None,
         "ref_number": None,
@@ -162,6 +161,9 @@ def make_empty_record():
         "categories": [],
         # Internal — stripped before upsert
         "_description_lines": [],
+        "_prebid_datetime": None,
+        "_question_deadline": None,
+        "_amendment_date": None,
     }
 
 
@@ -170,6 +172,8 @@ def parse_rfps_from_html(html, page_num=1):
     Parse one page of the WEBS bid calendar.
     Per-record errors are caught and logged — one bad row does not
     abort the rest of the page.
+    Optional fields (prebid, question deadline, amendment date) are
+    parsed into raw_data. Missing optional fields do not crash parsing.
     """
     rfps = []
     soup = BeautifulSoup(html, "lxml")
@@ -208,29 +212,45 @@ def parse_rfps_from_html(html, page_num=1):
 
                 cell_texts = [clean_text(c.get_text()) for c in cells]
 
-                # Column 0 contains the close date — extract just the date portion
-                # using regex because get_text() pulls nested content too
+                # Due date: first cell but get_text() pulls nested content —
+                # extract only the leading date portion with regex
                 due_date_raw = None
                 if cell_texts:
-                    date_match = re.match(r'(\d{1,2}/\d{1,2}/\d{2,4})', cell_texts[0].strip())
-                    if date_match:
-                        due_date_raw = date_match.group(1)
+                    dm = re.match(r"(\d{1,2}/\d{1,2}/\d{2,4})", cell_texts[0].strip())
+                    if dm:
+                        due_date_raw = dm.group(1)
                 current_rfp["due_date"] = parse_due_date(due_date_raw)
 
-                # Contact name: second-to-last cell, validated as a real name
+                # Contact name: WEBS embeds everything in one <td> so cell
+                # positions are unreliable. Extract with regex: after the ref
+                # number value, grab exactly FirstName LastName (two Title-cased
+                # words), stopping before a digit or known noise token.
                 contact = None
-                candidates = []
-                if len(cell_texts) >= 3:
-                    candidates.append(cell_texts[-2])
-                if len(cell_texts) >= 2:
-                    candidates.append(cell_texts[-1])
-                for c in candidates:
-                    if looks_like_name(c):
-                        contact = c
-                        break
+                row_text_full = clean_text(row.get_text())
+                if current_rfp.get("ref_number"):
+                    ref_escaped = re.escape(current_rfp["ref_number"])
+                    m = re.search(
+                        ref_escaped
+                        + r"\s+([A-Z][a-z]+\s+[A-Z][a-z]+)"
+                        + r"(?=\s+(?:\d|\b(?:Selective|The|This|To|WDFW|DOC|E&I|UW|WA|WSU)\b)|$)",
+                        row_text_full
+                    )
+                    if m:
+                        candidate = m.group(1).strip()
+                        if looks_like_name(candidate):
+                            contact = candidate
+                # Fallback: try cell-based candidates
+                if not contact:
+                    for c in [
+                        cell_texts[-2] if len(cell_texts) >= 3 else None,
+                        cell_texts[-1] if len(cell_texts) >= 2 else None,
+                    ]:
+                        if looks_like_name(c):
+                            contact = c
+                            break
                 current_rfp["contact_name"] = contact
 
-                # Agency from ref number (description fallback happens after parsing)
+                # Agency from ref number (description fallback applied post-parse)
                 current_rfp["agency"] = extract_agency_from_ref(current_rfp["ref_number"])
 
             elif current_rfp is not None:
@@ -243,33 +263,63 @@ def parse_rfps_from_html(html, page_num=1):
                 if not row_text:
                     continue
 
-                # Skip known noise rows
+                # Pure noise rows — skip entirely
                 if any(noise in row_text for noise in (
                     "Includes an Inclusion Plan",
                     "Additional Data",
-                    "Pre-Bid Conference",
-                    "Deadline for Submitting",
                 )):
                     continue
 
-                # Strip "Selective" prefix from description lines
+                # Pre-Bid Conference: parse datetime, do not add to description
+                if row_text.startswith("Pre-Bid Conference:"):
+                    raw = row_text[len("Pre-Bid Conference:"):].strip()
+                    dm = re.match(r"(\d{1,2}/\d{1,2}/\d{2,4})", raw)
+                    if dm and not current_rfp["_prebid_datetime"]:
+                        current_rfp["_prebid_datetime"] = parse_due_date(dm.group(1))
+                    continue
+
+                # Deadline for Submitting Questions: parse date, do not add to description
+                if row_text.startswith("Deadline for Submitting"):
+                    dm = re.search(r"(\d{1,2}/\d{1,2}/\d{2,4})", row_text)
+                    if dm and not current_rfp["_question_deadline"]:
+                        current_rfp["_question_deadline"] = parse_due_date(dm.group(1))
+                    continue
+
+                # Strip "Selective" prefix (WEBS procurement type token)
                 if row_text.startswith("Selective"):
                     row_text = row_text[len("Selective"):].strip()
+
+                # Strip leading date prefix from description lines.
+                # Format: "MM/DD/YY  Description text..." — the date is the
+                # amendment/posting date shown in the WEBS "Amendment Date" column.
+                date_prefix_m = re.match(r"^(\d{1,2}/\d{1,2}/\d{2,4})\s+", row_text)
+                if date_prefix_m:
+                    if not current_rfp["_amendment_date"]:
+                        current_rfp["_amendment_date"] = parse_due_date(
+                            date_prefix_m.group(1)
+                        )
+                    row_text = row_text[date_prefix_m.end():].strip()
 
                 if len(row_text) > 20:
                     current_rfp["_description_lines"].append(row_text)
 
         except Exception as e:
-            print(f"  [WARN] Page {page_num}, row {row_idx}: skipped due to error: {e}")
+            print(f"  [WARN] Page {page_num}, row {row_idx}: skipped — {e}")
             continue
 
     # Flush the last record
     if current_rfp and current_rfp.get("title"):
         rfps.append(current_rfp)
 
-    # Post-process: build description and agency fallback
+    # Post-process: build description, pack extra fields into raw_data,
+    # strip all internal _ fields before returning.
     for rfp in rfps:
         lines = rfp.pop("_description_lines", [])
+        prebid = rfp.pop("_prebid_datetime", None)
+        question_dl = rfp.pop("_question_deadline", None)
+        amendment = rfp.pop("_amendment_date", None)
+
+        # Build description from collected lines
         if lines:
             full_desc = " ".join(lines)
             if len(full_desc) > 600:
@@ -280,6 +330,17 @@ def parse_rfps_from_html(html, page_num=1):
             rfp["description"] = full_desc
         else:
             rfp["description"] = None
+
+        # Pack optional parsed fields into raw_data (not DB columns)
+        extra = {}
+        if prebid:
+            extra["prebid_datetime"] = prebid
+        if question_dl:
+            extra["question_deadline"] = question_dl
+        if amendment:
+            extra["amendment_date"] = amendment
+        if extra:
+            rfp["raw_data"] = json.dumps(extra)
 
         # Agency fallback: try description if ref lookup failed
         if not rfp.get("agency") and rfp.get("description"):
@@ -345,6 +406,7 @@ async def scrape_all_pages():
                 print(f"  Sample due:     {s.get('due_date')}")
                 print(f"  Sample agency:  {s.get('agency')}")
                 print(f"  Sample contact: {s.get('contact_name')}")
+                print(f"  Sample desc:    {str(s.get('description', ''))[:60]}")
 
             if not rfps:
                 print(f"  No RFPs found on page {page_num} — stopping")
@@ -384,8 +446,7 @@ def run():
         all_rfps = asyncio.run(scrape_all_pages())
         print(f"Total RFPs scraped across all pages: {len(all_rfps)}")
 
-        # Assign fingerprints — use ref_number in fingerprint when available
-        # so two RFPs with same title but different refs are not collapsed
+        # Assign fingerprints — use ref_number first to avoid collisions
         for rfp in all_rfps:
             rfp["fingerprint"] = generate_fingerprint(
                 rfp.get("title", ""),
@@ -399,9 +460,11 @@ def run():
         has_agency = sum(1 for r in all_rfps if r.get("agency"))
         has_contact = sum(1 for r in all_rfps if r.get("contact_name"))
         has_due_date = sum(1 for r in all_rfps if r.get("due_date"))
-        print(f"  With agency:   {has_agency}/{len(all_rfps)}")
-        print(f"  With contact:  {has_contact}/{len(all_rfps)}")
-        print(f"  With due date: {has_due_date}/{len(all_rfps)}")
+        has_desc = sum(1 for r in all_rfps if r.get("description"))
+        print(f"  With agency:      {has_agency}/{len(all_rfps)}")
+        print(f"  With contact:     {has_contact}/{len(all_rfps)}")
+        print(f"  With due date:    {has_due_date}/{len(all_rfps)}")
+        print(f"  With description: {has_desc}/{len(all_rfps)}")
 
         if all_rfps:
             batch_size = 50
