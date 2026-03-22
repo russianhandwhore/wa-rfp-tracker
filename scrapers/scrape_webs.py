@@ -9,9 +9,9 @@ import re
 from bs4 import BeautifulSoup
 
 BASE_URL = "https://pr-webs-vendor.des.wa.gov/BidCalendar.aspx"
+WEBS_BASE = "https://pr-webs-vendor.des.wa.gov"
 SOURCE_NAME = "WEBS - Washington Electronic Business Solution"
 
-# WA state agency codes found in ref numbers -> full agency names
 AGENCY_CODES = {
     "DCYF": "Dept. of Children, Youth & Families",
     "DNR": "Dept. of Natural Resources",
@@ -60,12 +60,50 @@ AGENCY_CODES = {
 
 
 def parse_due_date(date_str):
+    """
+    Parse WEBS close dates. Tries 2-digit year first (most common on WEBS),
+    then 4-digit year as fallback. Raises ValueError explicitly rather than
+    swallowing all exceptions.
+    """
     if not date_str:
         return None
-    try:
-        return datetime.strptime(date_str.strip(), "%m/%d/%y").isoformat()
-    except:
+    s = date_str.strip()
+    for fmt in ("%m/%d/%y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(s, fmt).isoformat()
+        except ValueError:
+            continue
+    # Log unparseable date so we know the format changed
+    print(f"  [WARN] Could not parse date: '{s}'")
+    return None
+
+
+def looks_like_name(s):
+    """
+    Returns True if a string looks like a real person's name.
+    Defined at module level — not inside a loop.
+    """
+    if not s or len(s) > 40:
+        return False
+    if "Ref #" in s or "Additional" in s:
+        return False
+    if re.match(r"^\d", s):
+        return False
+    # Must have at least two words (First Last)
+    return len(s.strip().split()) >= 2
+
+
+def build_detail_url(href):
+    """
+    Safely build an absolute URL from a relative href.
+    Handles both '/path' and 'path' forms.
+    """
+    if not href:
         return None
+    if href.startswith("http"):
+        return href
+    # Normalise to a single leading slash
+    return WEBS_BASE + "/" + href.lstrip("/")
 
 
 def extract_agency_from_ref(ref_number):
@@ -73,7 +111,6 @@ def extract_agency_from_ref(ref_number):
     if not ref_number:
         return None
     ref_upper = ref_number.upper()
-    # Try longest match first
     for code in sorted(AGENCY_CODES.keys(), key=len, reverse=True):
         if code in ref_upper:
             return AGENCY_CODES[code]
@@ -84,16 +121,14 @@ def extract_agency_from_description(description):
     """Try to extract agency name from description text."""
     if not description:
         return None
-    # Pattern: "Washington State Department of ..."
     match = re.search(
-        r'Washington\s+State\s+(Department\s+of\s+[\w\s&]+?)(?:\s*[,\.\(]|$)',
+        r"Washington\s+State\s+(Department\s+of\s+[\w\s&]+?)(?:\s*[,\.\(]|$)",
         description, re.IGNORECASE
     )
     if match:
         return "WA " + match.group(1).strip()
-    # Pattern: "Department of ..."
     match = re.search(
-        r'\b(Department\s+of\s+[\w\s&]{3,40}?)(?:\s*[,\.\("]|hereafter|$)',
+        r"\b(Department\s+of\s+[\w\s&]{3,40}?)(?:\s*[,\.\(\"']|hereafter|$)",
         description, re.IGNORECASE
     )
     if match:
@@ -103,100 +138,132 @@ def extract_agency_from_description(description):
     return None
 
 
-def parse_rfps_from_html(html):
+def make_empty_record():
+    """Return a record dict with all schema fields set to safe defaults."""
+    return {
+        # Required fields
+        "title": None,
+        "detail_url": None,
+        "ref_number": None,
+        "contact_name": None,
+        "contact_email": None,
+        "due_date": None,
+        "posted_date": None,
+        "agency": None,
+        "department": None,
+        "source_name": SOURCE_NAME,
+        "source_platform": "WEBS",
+        "source_url": BASE_URL,
+        "status": "active",
+        "description": None,
+        "rfp_type": None,
+        "includes_inclusion_plan": False,
+        "raw_data": None,
+        "categories": [],
+        # Internal — stripped before upsert
+        "_description_lines": [],
+    }
+
+
+def parse_rfps_from_html(html, page_num=1):
+    """
+    Parse one page of the WEBS bid calendar.
+    Per-record errors are caught and logged — one bad row does not
+    abort the rest of the page.
+    """
     rfps = []
     soup = BeautifulSoup(html, "lxml")
     grid = soup.find("table", {"id": "DataGrid1"})
     if not grid:
-        print("DataGrid1 not found in HTML")
+        print(f"  [ERROR] Page {page_num}: DataGrid1 table not found in HTML")
         return rfps
 
     rows = grid.find_all("tr")
     current_rfp = None
 
-    for row in rows:
-        cells = row.find_all("td")
-        if not cells:
+    for row_idx, row in enumerate(rows):
+        try:
+            cells = row.find_all("td")
+            if not cells:
+                continue
+
+            link = row.find("a", href=lambda x: x and "Search_BidDetails" in str(x))
+
+            if link:
+                # Save previous record before starting a new one
+                if current_rfp and current_rfp.get("title"):
+                    rfps.append(current_rfp)
+
+                current_rfp = make_empty_record()
+
+                current_rfp["title"] = clean_text(link.get_text()) or None
+                current_rfp["detail_url"] = build_detail_url(link.get("href", ""))
+
+                # Ref number is in a <b> tag labelled "Ref #"
+                ref_span = row.find("b", string=re.compile(r"Ref #"))
+                if ref_span:
+                    raw_ref = ref_span.find_next_sibling(string=True)
+                    if raw_ref:
+                        current_rfp["ref_number"] = clean_text(str(raw_ref)) or None
+
+                cell_texts = [clean_text(c.get_text()) for c in cells]
+
+                # Column 0 is always the close date on WEBS
+                current_rfp["due_date"] = parse_due_date(cell_texts[0]) if cell_texts else None
+
+                # Contact name: second-to-last cell, validated as a real name
+                contact = None
+                candidates = []
+                if len(cell_texts) >= 3:
+                    candidates.append(cell_texts[-2])
+                if len(cell_texts) >= 2:
+                    candidates.append(cell_texts[-1])
+                for c in candidates:
+                    if looks_like_name(c):
+                        contact = c
+                        break
+                current_rfp["contact_name"] = contact
+
+                # Agency from ref number (description fallback happens after parsing)
+                current_rfp["agency"] = extract_agency_from_ref(current_rfp["ref_number"])
+
+            elif current_rfp is not None:
+                row_text = clean_text(row.get_text())
+
+                # Inclusion plan flag
+                if "Includes an Inclusion Plan: Y" in str(row):
+                    current_rfp["includes_inclusion_plan"] = True
+
+                if not row_text:
+                    continue
+
+                # Skip known noise rows
+                if any(noise in row_text for noise in (
+                    "Includes an Inclusion Plan",
+                    "Additional Data",
+                    "Pre-Bid Conference",
+                    "Deadline for Submitting",
+                )):
+                    continue
+
+                # Strip "Selective" prefix from description lines
+                if row_text.startswith("Selective"):
+                    row_text = row_text[len("Selective"):].strip()
+
+                if len(row_text) > 20:
+                    current_rfp["_description_lines"].append(row_text)
+
+        except Exception as e:
+            print(f"  [WARN] Page {page_num}, row {row_idx}: skipped due to error: {e}")
             continue
 
-        link = row.find("a", href=lambda x: x and "Search_BidDetails" in str(x))
-        if link:
-            if current_rfp and current_rfp.get("title"):
-                rfps.append(current_rfp)
-
-            title = clean_text(link.get_text())
-            detail_url = "https://pr-webs-vendor.des.wa.gov/" + link["href"]
-
-            ref_span = row.find("b", string=re.compile(r"Ref #"))
-            ref_number = None
-            if ref_span:
-                ref_number = clean_text(ref_span.find_next_sibling(string=True))
-
-            cell_texts = [clean_text(c.get_text()) for c in cells]
-            close_date = parse_due_date(cell_texts[0]) if cell_texts else None
-
-            # WEBS has 4 cols: Close Date | Title+Ref | Contact | Additional Data
-            # Validate contact looks like a real person name (2 words, short, no Ref#)
-            def looks_like_name(s):
-                if not s or len(s) > 40:
-                    return False
-                if "Ref #" in s or "Additional" in s:
-                    return False
-                if re.match(r'^\d', s):
-                    return False
-                return len(s.strip().split()) >= 2
-
-            contact = None
-            for candidate in [cell_texts[-2] if len(cell_texts) >= 3 else None,
-                               cell_texts[-1] if len(cell_texts) >= 2 else None]:
-                if looks_like_name(candidate):
-                    contact = candidate
-                    break
-
-            current_rfp = {
-                "title": title,
-                "detail_url": detail_url,
-                "ref_number": ref_number,
-                "contact_name": contact,
-                "due_date": close_date,
-                "agency": extract_agency_from_ref(ref_number),
-                "source_name": SOURCE_NAME,
-                "source_platform": "WEBS",
-                "source_url": BASE_URL,
-                "status": "active",
-                "description": None,
-                "rfp_type": None,
-                "includes_inclusion_plan": False,
-                "description_lines": []
-            }
-
-        elif current_rfp is not None:
-            row_text = clean_text(row.get_text())
-
-            if "Includes an Inclusion Plan: Y" in str(row):
-                current_rfp["includes_inclusion_plan"] = True
-
-            if not row_text:
-                continue
-            if "Includes an Inclusion Plan" in row_text:
-                continue
-            if "Additional Data" in row_text:
-                continue
-            if "Pre-Bid Conference" in row_text:
-                continue
-            if "Deadline for Submitting" in row_text:
-                continue
-            if row_text.startswith("Selective"):
-                row_text = row_text[len("Selective"):].strip()
-
-            if len(row_text) > 20:
-                current_rfp["description_lines"].append(row_text)
-
+    # Flush the last record
     if current_rfp and current_rfp.get("title"):
         rfps.append(current_rfp)
 
+    # Post-process: build description and agency fallback
     for rfp in rfps:
-        lines = rfp.pop("description_lines", [])
+        lines = rfp.pop("_description_lines", [])
         if lines:
             full_desc = " ".join(lines)
             if len(full_desc) > 600:
@@ -208,7 +275,7 @@ def parse_rfps_from_html(html):
         else:
             rfp["description"] = None
 
-        # If agency not found from ref, try description
+        # Agency fallback: try description if ref lookup failed
         if not rfp.get("agency") and rfp.get("description"):
             rfp["agency"] = extract_agency_from_description(rfp["description"])
 
@@ -229,14 +296,12 @@ def get_next_page_control(html, next_page_num):
     pagination = soup.find("td", {"align": "center"})
     if not pagination:
         return None
-
     for a in pagination.find_all("a"):
         if a.get_text().strip() == str(next_page_num):
             href = a.get("href", "")
             match = re.search(r"__doPostBack\('([^']+)'", href)
             if match:
                 return match.group(1)
-
     return None
 
 
@@ -253,7 +318,7 @@ async def scrape_all_pages():
             await page.wait_for_selector("#DataGrid1", timeout=30000)
             print("Page loaded successfully!")
         except Exception as e:
-            print("Error loading initial page: " + str(e))
+            print(f"[ERROR] Failed to load initial WEBS page: {e}")
             await browser.close()
             return all_rfps
 
@@ -261,38 +326,40 @@ async def scrape_all_pages():
         max_pages = 25
 
         while page_num <= max_pages:
-            print("Scraping page " + str(page_num) + "...")
+            print(f"Scraping page {page_num}...")
             await asyncio.sleep(1)
             html = await page.content()
-            rfps = parse_rfps_from_html(html)
-            print("Found " + str(len(rfps)) + " RFPs on page " + str(page_num))
+            rfps = parse_rfps_from_html(html, page_num=page_num)
+            print(f"  Found {len(rfps)} RFPs on page {page_num}")
 
             if rfps:
-                sample = rfps[0]
-                print("  title:   " + str(sample.get("title", ""))[:60])
-                print("  ref:     " + str(sample.get("ref_number")))
-                print("  agency:  " + str(sample.get("agency")))
-                print("  contact: " + str(sample.get("contact_name")))
+                s = rfps[0]
+                print(f"  Sample title:   {str(s.get('title', ''))[:60]}")
+                print(f"  Sample ref:     {s.get('ref_number')}")
+                print(f"  Sample due:     {s.get('due_date')}")
+                print(f"  Sample agency:  {s.get('agency')}")
+                print(f"  Sample contact: {s.get('contact_name')}")
 
             if not rfps:
+                print(f"  No RFPs found on page {page_num} — stopping")
                 break
 
             all_rfps.extend(rfps)
 
             control_id = get_next_page_control(html, page_num + 1)
             if not control_id:
-                print("No next page, done at page " + str(page_num))
+                print(f"  No next page link found — done at page {page_num}")
                 break
 
-            print("Going to page " + str(page_num + 1) + "...")
+            print(f"  Navigating to page {page_num + 1}...")
             try:
                 async with page.expect_navigation(wait_until="domcontentloaded", timeout=30000):
-                    await page.evaluate("__doPostBack('" + control_id + "', '')")
+                    await page.evaluate(f"__doPostBack('{control_id}', '')")
                 await page.wait_for_selector("#DataGrid1", timeout=30000)
                 await asyncio.sleep(1)
                 page_num += 1
             except Exception as e:
-                print("Navigation error: " + str(e))
+                print(f"  [ERROR] Navigation to page {page_num + 1} failed: {e}")
                 break
 
         await browser.close()
@@ -301,44 +368,53 @@ async def scrape_all_pages():
 
 
 def run():
-    print("Starting WEBS scraper at " + str(datetime.now()))
+    print(f"Starting WEBS scraper at {datetime.now()}")
     supabase = get_supabase_client()
     all_rfps = []
-    total_new = 0
+    total_saved = 0
     error_msg = None
 
     try:
         all_rfps = asyncio.run(scrape_all_pages())
-        print("Total RFPs scraped: " + str(len(all_rfps)))
+        print(f"Total RFPs scraped across all pages: {len(all_rfps)}")
 
+        # Assign fingerprints — use ref_number in fingerprint when available
+        # so two RFPs with same title but different refs are not collapsed
         for rfp in all_rfps:
             rfp["fingerprint"] = generate_fingerprint(
                 rfp.get("title", ""),
-                rfp.get("agency", rfp.get("source_name", "")),
+                rfp.get("ref_number") or rfp.get("agency") or SOURCE_NAME,
                 rfp.get("due_date", "")
             )
 
         all_rfps = deduplicate(all_rfps)
-        print("Total after dedup: " + str(len(all_rfps)))
+        print(f"Total after deduplication: {len(all_rfps)}")
 
         has_agency = sum(1 for r in all_rfps if r.get("agency"))
-        print("RFPs with agency: " + str(has_agency) + " / " + str(len(all_rfps)))
+        has_contact = sum(1 for r in all_rfps if r.get("contact_name"))
+        has_due_date = sum(1 for r in all_rfps if r.get("due_date"))
+        print(f"  With agency:   {has_agency}/{len(all_rfps)}")
+        print(f"  With contact:  {has_contact}/{len(all_rfps)}")
+        print(f"  With due date: {has_due_date}/{len(all_rfps)}")
 
         if all_rfps:
             batch_size = 50
             for i in range(0, len(all_rfps), batch_size):
                 batch = all_rfps[i:i + batch_size]
-                supabase.table("rfps").upsert(batch, on_conflict="fingerprint").execute()
-                total_new += len(batch)
-                print("Saved batch of " + str(len(batch)) + " RFPs")
+                try:
+                    supabase.table("rfps").upsert(batch, on_conflict="fingerprint").execute()
+                    total_saved += len(batch)
+                    print(f"  Saved batch {i // batch_size + 1}: {len(batch)} records")
+                except Exception as batch_err:
+                    print(f"  [ERROR] Batch {i // batch_size + 1} failed: {batch_err}")
 
         status = "success"
-        print("Done! " + str(total_new) + " RFPs saved")
+        print(f"Done — {total_saved} records saved to Supabase")
 
     except Exception as e:
         error_msg = str(e)
         status = "failed"
-        print("Scraper failed: " + str(e))
+        print(f"[ERROR] Scraper run failed: {e}")
 
     finally:
         log_scrape(
@@ -346,7 +422,7 @@ def run():
             source_name=SOURCE_NAME,
             status=status,
             rfps_found=len(all_rfps),
-            rfps_new=total_new,
+            rfps_new=total_saved,
             rfps_updated=0,
             error_message=error_msg
         )
