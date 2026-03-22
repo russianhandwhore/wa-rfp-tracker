@@ -80,7 +80,14 @@ export default function App() {
 
     const { data, count, error } = await query
     if (!error) {
-      setRfps(data || [])
+      // Client-side safety filter — blocks >100 day items even if DB query returns them
+      const safe = (data || []).filter(r => {
+        const d = getDaysLeft(r.due_date)
+        return d !== null && d >= 1 && d <= 100
+      })
+      // Sort descending: most days left first
+      safe.sort((a, b) => getDaysLeft(b.due_date) - getDaysLeft(a.due_date))
+      setRfps(safe)
       setTotal(count || 0)
     }
     setLoading(false)
