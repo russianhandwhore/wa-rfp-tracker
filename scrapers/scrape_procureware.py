@@ -170,7 +170,7 @@ def make_empty_record(portal):
 
 def build_fingerprint(record, external_id=None):
     if external_id:
-        return record["source_portal"] + "|" + external_id
+        return record.get("source_url", "") + "|" + external_id
     key = "|".join([
         record.get("source_url", ""),
         record.get("ref_number", "") or "",
