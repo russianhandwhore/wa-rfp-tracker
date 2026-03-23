@@ -9,6 +9,7 @@ One bad detail page never kills the run.
 """
 
 import asyncio
+import requests
 import json
 import re
 from datetime import datetime, timezone
@@ -227,12 +228,18 @@ def parse_listing_page(html, portal):
             next_td = link_td.find_next_sibling("td")
             if next_td:
                 title = clean_text(next_td.get_text()) or None
-        # Reject title if it looks like a status word or is too short
         if title and (len(title) < 4 or title.lower() in OPEN_STATUSES):
             title = None
 
+        # Internal numeric ID from span.prim-column[data-id] — needed for description AJAX
+        internal_id = None
+        prim_span = link.find_parent("span", class_=lambda c: c and "prim-column" in c)
+        if prim_span:
+            internal_id = prim_span.get("data-id")
+
         entries.append({
             "external_id": guid,
+            "internal_id": internal_id,
             "detail_url": detail_url,
             "ref_number": ref_number,
             "title": title,
@@ -462,6 +469,69 @@ async def fetch_one_detail(context, entry, portal, semaphore, counts):
             await page.close()
 
 
+def fetch_description(session, internal_id, guid, token, base_url):
+    """
+    Fetch bid description via RenderViewAJAX using a requests session.
+    Returns description text or None. Never raises.
+    """
+    if not internal_id or not token:
+        return None
+    try:
+        resp = session.post(
+            base_url + "/domain/abe/RenderViewAJAX/",
+            data={
+                "mode": "0",
+                "id": str(internal_id),
+                "viewModelName": "",
+                "primId": str(internal_id),
+                "parentEntityId": "",
+                "parentEntityName": "Bid",
+                "baseEntityId": str(internal_id),
+                "baseEntityName": "Bid",
+                "fkGrandparentId": "",
+                "EntityGuid": guid,
+                "hex": "", "hex2": "",
+                "view": "bid_description_tab",
+                "treeId": "", "FieldSetters": "",
+                "excludeIds": "", "deactivatedIds": "", "selectedIds": "",
+                "currNav": "Description",
+                "CurrMenu": "Bids",
+                "CurrUser": "0",
+                "dom": "1",
+            },
+            headers={
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "X-Requested-With": "XMLHttpRequest",
+                "RequestVerificationToken": token,
+                "X-RequestVerificationToken": token,
+                "Referer": base_url + "/Bids/" + guid,
+            },
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        if data.get("StatusCode") != 1:
+            return None
+        html = data.get("Message", "")
+        soup = BeautifulSoup(html, "lxml")
+        for tag in soup.find_all(["script", "button", "input", "select"]):
+            tag.decompose()
+        text = clean_text(soup.get_text(" ", strip=True))
+        # Strip known boilerplate
+        for noise in [
+            "You must register and log in", "Bid Categories",
+            "Show/Hide Columns", "Export To Excel", "Export To PDF",
+            "Reset To Default", "support ticket",
+        ]:
+            text = text.replace(noise, "")
+        text = " ".join(text.split()).strip()
+        return text[:800] if len(text) > 30 else None
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Portal scraper
 # ---------------------------------------------------------------------------
@@ -510,28 +580,59 @@ async def scrape_portal(portal):
             await browser.close()
             return rfps, counts
 
-        # Phase 2: detail page fetching SKIPPED in v1 (bot detection/SPA issues)
-        # Records are built from listing data only.
+        # Phase 2: descriptions via requests (no Playwright — no bot detection)
         await browser.close()
 
-    # Build records from listing data only
+    # Create a requests session to fetch descriptions via AJAX
+    req_session = requests.Session()
+    req_session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/123.0.0.0 Safari/537.36"
+        ),
+    })
+    # GET listing page to establish session cookies + token
+    token = None
+    try:
+        lresp = req_session.get(listing_url, timeout=15)
+        lsoup = BeautifulSoup(lresp.text, "lxml")
+        tinput = lsoup.find("input", {"name": "__RequestVerificationToken"})
+        if tinput:
+            token = tinput["value"]
+    except Exception as e:
+        print(f"  [WARN] Could not get description token: {e}")
+
+    # Build records — fetch description for each via AJAX
     for entry in entries:
         external_id = entry["external_id"]
+        internal_id = entry.get("internal_id")
+
+        # Fetch description (fast, no Playwright)
+        description = fetch_description(
+            req_session, internal_id, external_id, token, portal["base_url"]
+        ) if internal_id and token else None
+
         record = make_empty_record(portal)
         record["detail_url"] = entry["detail_url"]
         record["ref_number"] = entry.get("ref_number")
         record["title"] = entry.get("title") or entry.get("ref_number") or "Untitled"
         record["due_date"] = entry.get("due_date")
-        record["status"] = "active"  # always active — status_text stored in raw_data
+        record["status"] = "active"
+        record["description"] = description
         record["raw_data"] = json.dumps({
             "external_id": external_id,
+            "internal_id": internal_id,
             "source_portal": portal["base_url"],
             "status_text": entry.get("status_text"),
             "bid_documents_url": entry["detail_url"] + "?t=BidDocuments",
         })
         record["fingerprint"] = build_fingerprint(record, external_id=external_id)
 
-        print(f"  {record['ref_number']} | '{str(record['title'])[:50]}' | due={record['due_date']}")
+        print(
+            f"  {record['ref_number']} | '{str(record['title'])[:40]}' "
+            f"| due={record['due_date']} | desc={'✓' if description else '✗'}"
+        )
 
         rfps.append(record)
         counts["saved"] += 1
