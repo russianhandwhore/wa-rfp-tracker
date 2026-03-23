@@ -70,6 +70,9 @@ LOGIN_PHRASES = frozenset({
     "must be logged", "requires login", "not authorized",
 })
 
+# Temporary debug counter — limits debug output to first 2 non-gated records
+_DEBUG_COUNT = [0]
+
 DATE_NOISE_RE = re.compile(
     r"\(in \d+ days?\)|\(overdue\)|\(today\)|due|close[sd]?|deadline",
     re.IGNORECASE,
@@ -269,6 +272,19 @@ def parse_detail_html(html, entry, portal):
         return result
 
     portal_name_lower = portal["portal_name"].lower()
+
+    # --- TEMPORARY DEBUG: first 2 non-gated Snohomish records only ---
+    if "snoco" in portal["base_url"] and _DEBUG_COUNT[0] < 2:
+        _DEBUG_COUNT[0] += 1
+        # Strip nav/header/footer for cleaner output
+        debug_soup = BeautifulSoup(html, "lxml")
+        for tag in debug_soup.find_all(["nav", "header", "footer"]):
+            tag.decompose()
+        content_text = debug_soup.get_text(" ", strip=True)
+        print(f"\n[DEBUG {_DEBUG_COUNT[0]}] ref={entry.get('ref_number')} url={entry.get('detail_url')}")
+        print(f"[DEBUG {_DEBUG_COUNT[0]}] CONTENT (first 1000 chars):\n{content_text[:1000]}")
+        print(f"[DEBUG {_DEBUG_COUNT[0]} END]\n")
+    # --- END TEMPORARY DEBUG ---
 
     # --- Title ---
     # ProcureWare renders bid name in h2/h3. Skip nav/breadcrumb text.
