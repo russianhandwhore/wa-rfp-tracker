@@ -424,14 +424,34 @@ async def fetch_one_detail(context, entry, portal, semaphore, counts):
     Open one detail page in its own browser page.
     Returns enriched dict or None on failure.
     Each task owns its page — no shared page, no race condition.
+    Waits for JS render: networkidle + bid content selector before snapshot.
     """
     async with semaphore:
         page = await context.new_page()
         try:
             await page.goto(
-                entry["detail_url"], timeout=15000, wait_until="domcontentloaded"
+                entry["detail_url"], timeout=30000, wait_until="networkidle"
             )
-            await asyncio.sleep(1)
+            # Wait for actual bid content to appear in the DOM.
+            # ProcureWare renders a main content container after JS loads.
+            # Try common bid content selectors — fall back to timed wait if none appear.
+            content_selectors = [
+                "[class*='bid']",
+                "[class*='Bid']",
+                "main",
+                "#main-content",
+                "[class*='detail']",
+                "[class*='content']",
+            ]
+            for sel in content_selectors:
+                try:
+                    await page.wait_for_selector(sel, timeout=5000)
+                    break
+                except Exception:
+                    continue
+            else:
+                # No selector matched — give JS a fixed extra wait
+                await asyncio.sleep(2)
             html = await page.content()
             enriched = parse_detail_html(html, entry, portal)
             if enriched.get("login_gated"):
