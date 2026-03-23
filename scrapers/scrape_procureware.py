@@ -489,9 +489,6 @@ async def scrape_portal(portal):
             record["contact_name"] = enriched.get("contact_name")
             record["contact_email"] = enriched.get("contact_email")
             record["posted_date"] = enriched.get("posted_date")
-            record["has_public_documents"] = enriched.get("has_public_documents", False)
-            record["has_results_tab"] = enriched.get("has_results_tab", False)
-            record["has_login_required_documents"] = enriched.get("has_login_required_documents", False)
             docs = enriched.get("documents", [])
             record["raw_data"] = json.dumps({
                 "external_id": external_id,
