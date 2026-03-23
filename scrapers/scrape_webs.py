@@ -232,15 +232,13 @@ def parse_rfps_from_html(html, page_num=1):
                 # Contact name: WEBS embeds everything in one <td> so cell
                 # positions are unreliable. Extract with regex: after the ref
                 # number value, grab exactly FirstName LastName (two Title-cased
-                # words), stopping before a digit or known noise token.
+                # words). looks_like_name() validates the result.
                 contact = None
                 row_text_full = clean_text(row.get_text())
                 if current_rfp.get("ref_number"):
                     ref_escaped = re.escape(current_rfp["ref_number"])
                     m = re.search(
-                        ref_escaped
-                        + r"\s+([A-Z][a-z]+\s+[A-Z][a-z]+)"
-                        + r"(?=\s+(?:\d|\b(?:Selective|The|This|To|WDFW|DOC|E&I|UW|WA|WSU)\b)|$)",
+                        ref_escaped + r"\s+([A-Z][a-z'\-]+\s+[A-Z][a-z'\-]+)",
                         row_text_full
                     )
                     if m:
@@ -457,6 +455,7 @@ def run():
     total_saved = 0
     error_msg = None
 
+    status = "failed"  # default — overwritten to "success" if run completes
     try:
         all_rfps = asyncio.run(scrape_all_pages())
         print(f"Total RFPs scraped across all pages: {len(all_rfps)}")
