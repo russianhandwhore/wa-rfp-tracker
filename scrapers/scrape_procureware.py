@@ -522,10 +522,11 @@ async def scrape_portal(portal):
         record["ref_number"] = entry.get("ref_number")
         record["title"] = entry.get("title") or entry.get("ref_number") or "Untitled"
         record["due_date"] = entry.get("due_date")
-        record["status"] = entry.get("status_text", "open")
+        record["status"] = "active"  # always active — status_text stored in raw_data
         record["raw_data"] = json.dumps({
             "external_id": external_id,
             "source_portal": portal["base_url"],
+            "status_text": entry.get("status_text"),
         })
         record["fingerprint"] = build_fingerprint(record, external_id=external_id)
 
