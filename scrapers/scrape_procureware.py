@@ -147,8 +147,8 @@ def make_empty_record(portal):
         "source_platform": SOURCE_PLATFORM,
         "source_name": SOURCE_NAME,
         "source_url": portal["base_url"] + portal["bids_path"],
-        "source_portal": portal["base_url"],
-        # external_id kept out of DB record — stored in raw_data instead
+        # source_portal, has_public_documents, has_results_tab,
+        # has_login_required_documents are NOT DB columns — stored in raw_data
         "title": None,
         "ref_number": None,
         "agency": portal["portal_name"],
@@ -159,9 +159,6 @@ def make_empty_record(portal):
         "description": None,
         "contact_name": None,
         "contact_email": None,
-        "has_public_documents": False,
-        "has_results_tab": False,
-        "has_login_required_documents": False,
         "detail_url": None,
         "rfp_type": None,
         "includes_inclusion_plan": False,
@@ -175,7 +172,7 @@ def build_fingerprint(record, external_id=None):
     if external_id:
         return record["source_portal"] + "|" + external_id
     key = "|".join([
-        record.get("source_portal", ""),
+        record.get("source_url", ""),
         record.get("ref_number", "") or "",
         record.get("due_date", "") or "",
         (record.get("title", "") or "").lower().strip(),
@@ -498,13 +495,20 @@ async def scrape_portal(portal):
             docs = enriched.get("documents", [])
             record["raw_data"] = json.dumps({
                 "external_id": external_id,
+                "source_portal": portal["base_url"],
+                "has_public_documents": enriched.get("has_public_documents", False),
+                "has_results_tab": enriched.get("has_results_tab", False),
+                "has_login_required_documents": enriched.get("has_login_required_documents", False),
                 "documents": docs,
                 "login_gated": enriched.get("login_gated", False),
             })
         else:
             # Detail fetch failed — save with listing data only
             record["title"] = entry.get("ref_number") or "Untitled"
-            record["raw_data"] = json.dumps({"external_id": external_id})
+            record["raw_data"] = json.dumps({
+                "external_id": external_id,
+                "source_portal": portal["base_url"],
+            })
 
         record["fingerprint"] = build_fingerprint(record, external_id=external_id)
 
