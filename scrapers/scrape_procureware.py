@@ -271,25 +271,42 @@ def parse_detail_html(html, entry, portal):
     portal_name_lower = portal["portal_name"].lower()
 
     # --- Title ---
-    # ProcureWare renders bid name in h2/h3, sometimes with a label before it
+    # ProcureWare renders bid name in h2/h3. Skip nav/breadcrumb text.
+    # "Return to Bid List Bid" is a known false positive — heading get_text()
+    # picks up the breadcrumb anchor + page section label.
     for sel in ["h2", "h3", "h4", ".bid-title", "[class*='title']", "[class*='Title']"]:
         tag = soup.select_one(sel)
         if tag:
             text = clean_text(tag.get_text())
+            lower = text.lower()
             if (
                 text
                 and len(text) > 5
-                and text.lower() not in SKIP_HEADINGS
-                and portal_name_lower not in text.lower()
-                and not text.lower().startswith("bid")
+                and lower not in SKIP_HEADINGS
+                and portal_name_lower not in lower
+                and not lower.startswith("bid")
+                and "return to" not in lower
+                and "bid list" not in lower
             ):
                 result["title"] = text
                 break
 
+    # Fallback: scan page text for "Bid Title:" or "Title:" label
+    # ProcureWare detail pages often render fields as "Label: Value" pairs
+    if not result["title"] or result["title"] == entry.get("ref_number"):
+        title_m = re.search(
+            r"(?:Bid\s+Title|Title)\s*[:\-]\s*([^\n\r]{5,120})",
+            page_text, re.IGNORECASE,
+        )
+        if title_m:
+            candidate = clean_text(title_m.group(1))
+            if candidate and len(candidate) > 5 and "return to" not in candidate.lower():
+                result["title"] = candidate
+
     # --- Department ---
     # Look for "Department:" label pattern in page text
     dept_m = re.search(
-        r"(?:Department|Division|Unit)\s*[:\-]\s*([A-Za-z][^\n\r]{3,60}?)(?:\s{2,}|$|\n)",
+        r"(?:Department|Division|Unit|Dept\.?|Issuing\s+Department|Requesting\s+Department)\s*[:\-]\s*([A-Za-z][^\n\r]{3,60}?)(?:\s{2,}|$|\n)",
         page_text, re.IGNORECASE,
     )
     if dept_m:
@@ -330,7 +347,7 @@ def parse_detail_html(html, entry, portal):
         result["contact_email"] = email_m.group(0).lower()
 
     contact_m = re.search(
-        r"(?:Contact|Buyer|Procurement Contact|Assigned To)\s*[:\-]\s*"
+        r"(?:Contact|Buyer|Procurement Contact|Purchasing Contact|Contact Person|Assigned To)\s*[:\-]\s*"
         r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})",
         page_text,
     )
