@@ -220,10 +220,22 @@ def parse_listing_page(html, portal):
         all_dates = extract_dates(container_text)
         due_date = all_dates[-1] if all_dates else None
 
+        # Title: the <td> immediately after the <td> containing the bid link
+        title = None
+        link_td = link.find_parent("td")
+        if link_td:
+            next_td = link_td.find_next_sibling("td")
+            if next_td:
+                title = clean_text(next_td.get_text()) or None
+        # Reject title if it looks like a status word or is too short
+        if title and (len(title) < 4 or title.lower() in OPEN_STATUSES):
+            title = None
+
         entries.append({
             "external_id": guid,
             "detail_url": detail_url,
             "ref_number": ref_number,
+            "title": title,
             "due_date": due_date,
             "status_text": status_text,
         })
@@ -508,7 +520,7 @@ async def scrape_portal(portal):
         record = make_empty_record(portal)
         record["detail_url"] = entry["detail_url"]
         record["ref_number"] = entry.get("ref_number")
-        record["title"] = entry.get("ref_number") or "Untitled"
+        record["title"] = entry.get("title") or entry.get("ref_number") or "Untitled"
         record["due_date"] = entry.get("due_date")
         record["status"] = entry.get("status_text", "open")
         record["raw_data"] = json.dumps({
@@ -517,7 +529,7 @@ async def scrape_portal(portal):
         })
         record["fingerprint"] = build_fingerprint(record, external_id=external_id)
 
-        print(f"  {record['ref_number']} | due={record['due_date']} | status={record['status']}")
+        print(f"  {record['ref_number']} | '{str(record['title'])[:50]}' | due={record['due_date']}")
 
         rfps.append(record)
         counts["saved"] += 1
