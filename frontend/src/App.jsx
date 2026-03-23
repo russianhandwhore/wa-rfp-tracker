@@ -131,6 +131,14 @@ export default function App() {
     } catch { return [] }
   }
 
+  function getBidDocsUrl(rfp) {
+    if (!rfp.raw_data) return null
+    try {
+      const parsed = typeof rfp.raw_data === 'string' ? JSON.parse(rfp.raw_data) : rfp.raw_data
+      return parsed.bid_documents_url || null
+    } catch { return null }
+  }
+
   function openDocsModal(rfp) {
     setDocsModal({ title: rfp.title, detailUrl: rfp.detail_url, documents: getDocuments(rfp) })
   }
@@ -495,11 +503,12 @@ export default function App() {
                               View RFP →
                             </a>
                           )}
-                          {hasDocuments && (
-                            <button onClick={() => openDocsModal(rfp)} className="text-xs font-semibold px-4 py-2 rounded-lg border-2 border-gray-300 hover:border-red-400 hover:text-red-600 transition-all whitespace-nowrap bg-white">
-                              📄 Documents
-                            </button>
-                          )}
+                          {hasDocuments && (() => {
+                            const bidDocsUrl = getBidDocsUrl(rfp)
+                            return bidDocsUrl
+                              ? <a href={bidDocsUrl} target="_blank" rel="noopener noreferrer" className="text-xs font-semibold px-4 py-2 rounded-lg border-2 border-gray-300 hover:border-red-400 hover:text-red-600 transition-all whitespace-nowrap bg-white">📄 Bid Docs</a>
+                              : <button onClick={() => openDocsModal(rfp)} className="text-xs font-semibold px-4 py-2 rounded-lg border-2 border-gray-300 hover:border-red-400 hover:text-red-600 transition-all whitespace-nowrap bg-white">📄 Documents</button>
+                          })()}
                         </div>
                       </div>
                     </div>

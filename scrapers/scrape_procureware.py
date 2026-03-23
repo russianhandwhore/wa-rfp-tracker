@@ -527,6 +527,7 @@ async def scrape_portal(portal):
             "external_id": external_id,
             "source_portal": portal["base_url"],
             "status_text": entry.get("status_text"),
+            "bid_documents_url": entry["detail_url"] + "?t=BidDocuments",
         })
         record["fingerprint"] = build_fingerprint(record, external_id=external_id)
 
