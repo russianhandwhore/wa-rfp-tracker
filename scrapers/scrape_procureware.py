@@ -124,9 +124,22 @@ def absolute_url(href, base_url):
     return base_url.rstrip("/") + "/" + href.lstrip("/")
 
 
-def page_is_login_gated(text):
-    lower = text.lower()
-    return any(phrase in lower for phrase in LOGIN_PHRASES)
+def page_is_login_gated(soup):
+    """
+    Returns True only if the MAIN CONTENT area (not nav/header/footer)
+    contains login-required language. Prevents the nav 'Log In' button
+    from false-positive gating every public page.
+    """
+    # Remove nav, header, footer before checking
+    for tag in soup.find_all(["nav", "header", "footer"]):
+        tag.decompose()
+    content_text = soup.get_text(" ", strip=True).lower()
+    # Only gate if a strong login-required phrase appears in content
+    strong_phrases = frozenset({
+        "must be logged", "requires login", "not authorized",
+        "you must log in to", "login required", "please log in to access",
+    })
+    return any(phrase in content_text for phrase in strong_phrases)
 
 
 def make_empty_record(portal):
@@ -135,7 +148,7 @@ def make_empty_record(portal):
         "source_name": SOURCE_NAME,
         "source_url": portal["base_url"] + portal["bids_path"],
         "source_portal": portal["base_url"],
-        "external_id": None,
+        # external_id kept out of DB record — stored in raw_data instead
         "title": None,
         "ref_number": None,
         "agency": portal["portal_name"],
@@ -158,9 +171,9 @@ def make_empty_record(portal):
     }
 
 
-def build_fingerprint(record):
-    if record.get("external_id"):
-        return record["source_portal"] + "|" + record["external_id"]
+def build_fingerprint(record, external_id=None):
+    if external_id:
+        return record["source_portal"] + "|" + external_id
     key = "|".join([
         record.get("source_portal", ""),
         record.get("ref_number", "") or "",
@@ -252,8 +265,8 @@ def parse_detail_html(html, entry, portal):
     base = portal["base_url"]
     page_text = soup.get_text(" ", strip=True)
 
-    # Login gate check
-    if page_is_login_gated(page_text):
+    # Login gate check — pass soup so nav/header/footer can be excluded
+    if page_is_login_gated(soup):
         result["login_gated"] = True
         result["has_login_required_documents"] = True
         return result
@@ -465,8 +478,8 @@ async def scrape_portal(portal):
     # Build final records
     for entry, enriched in zip(entries, detail_results):
         counts["opened"] += 1
+        external_id = entry["external_id"]  # used for fingerprint + raw_data only
         record = make_empty_record(portal)
-        record["external_id"] = entry["external_id"]
         record["detail_url"] = entry["detail_url"]
         record["ref_number"] = entry.get("ref_number")
         record["due_date"] = entry.get("due_date")
@@ -484,14 +497,16 @@ async def scrape_portal(portal):
             record["has_login_required_documents"] = enriched.get("has_login_required_documents", False)
             docs = enriched.get("documents", [])
             record["raw_data"] = json.dumps({
+                "external_id": external_id,
                 "documents": docs,
                 "login_gated": enriched.get("login_gated", False),
             })
         else:
             # Detail fetch failed — save with listing data only
             record["title"] = entry.get("ref_number") or "Untitled"
+            record["raw_data"] = json.dumps({"external_id": external_id})
 
-        record["fingerprint"] = build_fingerprint(record)
+        record["fingerprint"] = build_fingerprint(record, external_id=external_id)
 
         print(
             f"  {record['ref_number']} | '{str(record['title'])[:45]}' "
