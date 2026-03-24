@@ -151,9 +151,13 @@ def fetch_detail(detail_url):
         if poc_m:
             candidate = clean_text(poc_m.group(1))
             if "@" in candidate:
-                # Email only — store as email, leave name as None
-                if not contact_email:
-                    contact_email = candidate.lower()
+                # Extract just the email from the POC value (may have trailing noise)
+                # Always use POC email — it is more specific than the general page email
+                email_in_poc = re.search(
+                    r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", candidate
+                )
+                if email_in_poc:
+                    contact_email = email_in_poc.group(0).lower()
             else:
                 words = candidate.split()
                 if 2 <= len(words) <= 6 and "http" not in candidate:
