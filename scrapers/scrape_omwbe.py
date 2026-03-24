@@ -130,11 +130,24 @@ def fetch_detail(detail_url):
             if best:
                 description = best[:MAX_DESC_CHARS]
 
-        return description, organization
+        # Contact name: OMWBE requires "Point of Contact" on every bid post
+        contact_name = None
+        contact_m = _re.search(
+            r"(?:Point of Contact|Contact)\s*[:\-]\s*(.{2,80}?)(?:\s{2,}|Email|Phone|Closing|$)",
+            page_text, _re.IGNORECASE
+        )
+        if contact_m:
+            candidate = clean_text(contact_m.group(1))
+            # Must look like a name — at least 2 words, no URLs or emails
+            words = candidate.split()
+            if 2 <= len(words) <= 5 and "@" not in candidate and "http" not in candidate:
+                contact_name = candidate
+
+        return description, organization, contact_name
 
     except Exception as e:
         print(f"  [WARN] Detail fetch failed {detail_url}: {e}")
-        return None, None
+        return None, None, None
 
 
 def scrape_listings():
@@ -210,14 +223,14 @@ def scrape_listings():
         for future in as_completed(future_to_url):
             url = future_to_url[future]
             try:
-                desc, org = future.result()
+                desc, org, contact = future.result()
             except Exception:
-                desc, org = None, None
-            details[url] = (desc, org)
+                desc, org, contact = None, None, None
+            details[url] = (desc, org, contact)
 
     # Build final records
     for rec in base_records:
-        desc, org = details.get(rec["detail_url"], (None, None))
+        desc, org, contact = details.get(rec["detail_url"], (None, None, None))
 
         rfp = {
             "title": rec["title"],
@@ -225,13 +238,13 @@ def scrape_listings():
             "due_date": rec["due_date"],
             "description": desc,
             "agency": org,
+            "contact_name": contact,
             "source_url": SOURCE_URL,
             "source_name": SOURCE_NAME,
             "source_platform": SOURCE_PLATFORM,
             "status": "active",
             "department": None,
             "ref_number": None,
-            "contact_name": None,
             "contact_email": None,
             "posted_date": None,
             "rfp_type": None,
