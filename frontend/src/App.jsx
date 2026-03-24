@@ -518,7 +518,7 @@ export default function App() {
                           <div className="text-xs text-gray-400 uppercase tracking-wide mb-1">Due Date</div>
                           <div className={"text-sm font-bold text-gray-800"}>{formatDate(rfp.due_date)}</div>
                           {daysLeft !== null && (
-                            <div className={"text-xs mt-0.5 " + getDaysColor(daysLeft)}>
+                            <div className="text-xs mt-0.5 text-gray-900">
                               {daysLeft < 0 ? 'Expired' : daysLeft === 0 ? 'Due today!' : daysLeft + ' days left'}
                             </div>
                           )}
