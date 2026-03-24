@@ -34,11 +34,11 @@ jobs:
       #     SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
       #   run: python scrapers/scrape_opengov.py
 
-      - name: Run Procureware scraper (Spokane + Snohomish + Community Transit)
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python scrapers/scrape_procureware.py
+      #- name: Run Procureware scraper (Spokane + Snohomish + Community Transit)
+      #  env:
+      #    SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      #    SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      #  run: python scrapers/scrape_procureware.py
 
       - name: Run OMWBE scraper
         env:
