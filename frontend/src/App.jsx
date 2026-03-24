@@ -40,14 +40,14 @@ export default function App() {
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
   const [nearTotal, setNearTotal] = useState(0)
-  const [showExpired, setShowExpired] = useState(false)
+  const [showEvaluating, setShowEvaluating] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [docsModal, setDocsModal] = useState(null)
   const [contactModal, setContactModal] = useState(null)
   const [contactInfo, setContactInfo] = useState(null)
   const [contactLoading, setContactLoading] = useState(false)
 
-  useEffect(() => { fetchRfps() }, [search, platform, page, showExpired, category, sortBy])
+  useEffect(() => { fetchRfps() }, [search, platform, page, showEvaluating, category, sortBy])
 
   useEffect(() => {
     const handler = (e) => {
@@ -60,6 +60,7 @@ export default function App() {
   async function fetchRfps() {
     setLoading(true)
 
+    const now = new Date().toISOString()
     const sortMap = {
       'created_at_desc':  { col: 'created_at', asc: false, nullsFirst: false },
       'created_at_asc':   { col: 'created_at', asc: true,  nullsFirst: false },
@@ -72,16 +73,25 @@ export default function App() {
       .from('rfps')
       .select('*', { count: 'exact' })
       .in('status', ['active', 'upcoming'])
+      .or(`due_date.gte.${now},due_date.is.null`)
       .order(sort.col, { ascending: sort.asc, nullsFirst: sort.nullsFirst })
       .range((page - 1) * PER_PAGE, page * PER_PAGE - 1)
 
     if (search) query = query.ilike('title', '%' + search + '%')
     if (platform !== 'All') query = query.eq('source_platform', platform)
     if (category !== 'All') query = query.contains('categories', [category])
-
     const { data, count, error } = await query
     if (!error) {
-      const filtered = (data || []).filter(r => !isBlankCard(r))
+      const filtered = (data || []).filter(r => {
+        if (isBlankCard(r)) return false
+        if (!showEvaluating) {
+          try {
+            const raw = JSON.parse(r.raw_data || '{}')
+            if (raw.phase_label === 'Evaluating') return false
+          } catch { return true }
+        }
+        return true
+      })
       setRfps(filtered)
       setTotal(count || 0)
     }
@@ -416,8 +426,8 @@ export default function App() {
               {SORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
             <label className="flex items-center gap-2 px-4 py-3 rounded-lg border border-gray-300 cursor-pointer hover:border-gray-400 bg-white">
-              <input type="checkbox" checked={showExpired} onChange={e => { setShowExpired(e.target.checked); setPage(1) }} className="rounded" />
-              <span className="text-sm text-gray-600 whitespace-nowrap">Show Expired</span>
+              <input type="checkbox" checked={showEvaluating} onChange={e => { setShowEvaluating(e.target.checked); setPage(1) }} className="rounded" />
+              <span className="text-sm text-gray-600 whitespace-nowrap">RFPs Under Eval</span>
             </label>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
