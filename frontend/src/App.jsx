@@ -263,6 +263,12 @@ export default function App() {
                 </div>
               ) : contactInfo && !contactInfo._error ? (
                 <div className="space-y-2">
+                  {contactInfo.name && contactInfo.name !== 'null' && (
+                    <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl">
+                      <span className="text-lg">👤</span>
+                      <div><p className="text-xs text-gray-400">Name</p><p className="text-sm font-medium text-gray-800">{contactInfo.name}</p></div>
+                    </div>
+                  )}
                   {contactInfo.title && contactInfo.title !== 'null' && (
                     <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl">
                       <span className="text-lg">🏢</span>
