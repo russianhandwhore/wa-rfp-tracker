@@ -61,42 +61,24 @@ export default async function handler(req, res) {
   const cleanOrg = rawOrg.replace(/[^a-zA-Z0-9\s\-\.\,&()]/g, '').replace(/^[\s\-]+|[\s\-]+$/g, '').slice(0, 100)
   const orgContext = cleanOrg.length > 2 ? `at "${cleanOrg}"` : 'in Washington State government procurement'
 
-  // Build search prompt — aggressive, multi-search, extract everything found
-  const searchPrompt = isEmail
-    ? `You are a research assistant. The email address "${cleanName}" belongs to a government procurement contact ${orgContext} in Washington State.
+  // Two-step: search, then extract phone/email/name from raw results
+  const searchTerm = isEmail
+    ? `"${cleanName}"`
+    : `"${cleanName}" ${cleanOrg} Washington`
 
-Search the web to identify this person. Try searches like:
-- "${cleanName}"
-- The email domain staff directory
-- "${cleanName.split('@')[1]}" staff directory procurement
+  const searchPrompt = `Search the web for ${searchTerm}.
 
-From the search results, extract:
-- Their full name
-- Their job title / role
-- Their direct phone number or department phone
-- Confirm their email
+Look through every search result snippet returned. Extract any phone numbers, email addresses, job titles, and full names that appear in the snippets — especially anything matching "${cleanName}".
 
-Return ONLY valid JSON with no extra text:
-{"name": null, "title": null, "phone": null, "email": "${cleanName}"}
+Do not reason or explain. Just copy what you find directly from the snippets into this JSON:
+{"name": null, "title": null, "email": null, "phone": null}
 
-Fill every field you can find from search results. Only use null if you truly cannot find it.`
-
-    : `You are a research assistant. Search the web to find contact details for "${cleanName}" ${orgContext} in Washington State.
-
-Try multiple searches:
-- "${cleanName}" "${cleanOrg}"
-- "${cleanName}" Washington State government phone email
-- "${cleanOrg}" staff directory "${cleanName}"
-
-From the search results, extract:
-- Their job title / role
-- Their direct work email address
-- Their direct phone number or department phone
-
-Return ONLY valid JSON with no extra text:
-{"title": null, "email": null, "phone": null}
-
-Fill every field you can find. Only use null if you truly cannot find it after searching.`
+Rules:
+- phone: any number like (360) 555-1234 or 360-555-1234 found in results
+- email: any @email found in results
+- name: full name if found (skip if input is already a name)
+- title: job title if found
+- Use null only if it genuinely does not appear anywhere in the results`
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -107,8 +89,8 @@ Fill every field you can find. Only use null if you truly cannot find it after s
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1024,
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2048,
         tools: [{ type: 'web_search_20250305', name: 'web_search' }],
         messages: [{ role: 'user', content: searchPrompt }]
       })
