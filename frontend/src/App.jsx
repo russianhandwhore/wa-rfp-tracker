@@ -149,7 +149,8 @@ export default function App() {
     const dept = rfp.department || ''
     const displayOrg = agency || dept || 'Washington State Government'
 
-    const searchName = name || agency  // use org name if no personal name
+    // searchName: best available term for AI lookup and Google search
+    const searchName = name || rfp.contact_email || agency
     const googleQuery = [searchName, 'Washington State procurement'].filter(Boolean).join(' ')
     const linkedinQuery = [name, agency || dept, 'Washington'].filter(Boolean).join(' ')
 
@@ -163,14 +164,14 @@ export default function App() {
     })
     setContactInfo(null)
 
-    // Only run AI lookup if we have a real person name to search for
-    if (name) {
+    // Always run AI lookup — use name, email, or agency as search term
+    if (searchName) {
       setContactLoading(true)
       try {
         const res = await fetch('/api/contact', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, agency, department: dept })
+          body: JSON.stringify({ name: searchName, agency, department: dept })
         })
         if (!res.ok) throw new Error('Failed')
         const parsed = await res.json()
