@@ -1,6 +1,6 @@
 // api/contact.js
-// Vercel serverless function — API key stored server-side only, never exposed to browser.
-// Rate limited per IP: max 10 requests per hour per visitor.
+// Vercel serverless function — API key stored server-side only.
+// Rate limited per IP: max 10 requests per hour.
 
 const rateLimitMap = new Map()
 const MAX_REQUESTS_PER_HOUR = 10
@@ -16,6 +16,39 @@ function isRateLimited(ip) {
   record.count++
   rateLimitMap.set(ip, record)
   return record.count > MAX_REQUESTS_PER_HOUR
+}
+
+function extractJson(text) {
+  if (!text) return null
+  const clean = text.replace(/```json|```/g, '').trim()
+  const match = clean.match(/\{[\s\S]*\}/)
+  if (!match) return null
+  try { return JSON.parse(match[0]) } catch { return null }
+}
+
+function safeStr(val) {
+  return typeof val === 'string' && val !== 'null' && val.trim().length > 0
+    ? val.trim()
+    : null
+}
+
+async function callClaude(messages, apiKey) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2048,
+      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+      messages,
+    })
+  })
+  if (!res.ok) throw new Error(`API error ${res.status}`)
+  return res.json()
 }
 
 export default async function handler(req, res) {
@@ -37,88 +70,76 @@ export default async function handler(req, res) {
   }
 
   const { name, agency, department } = req.body
-
   if (!name || typeof name !== 'string' || name.length > 120) {
     return res.status(400).json({ error: 'Invalid input' })
   }
 
   const cleanName = name.trim()
 
-  // Accept either a person name OR an email address as the search term
   const isEmail = /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/.test(cleanName)
-  const isName = /^[a-zA-Z\s\-\.'@.]{2,80}$/.test(cleanName)
-
+  const isName  = /^[a-zA-Z0-9\s\-\.'@._+]{2,80}$/.test(cleanName)
   if (!isEmail && !isName) {
     return res.status(400).json({ error: 'Invalid name format' })
   }
 
-  // Build org context — strip platform names that may leak through
+  // Strip platform names from org
   const platformNames = ['WEBS', 'Washington Electronic Business Solution', 'OpenGov', 'Procureware', 'OMWBE']
-  let rawOrg = ((department || agency || '')).toString()
-  for (const p of platformNames) {
-    rawOrg = rawOrg.replace(new RegExp(p, 'gi'), '').trim()
-  }
+  let rawOrg = (department || agency || '').toString()
+  for (const p of platformNames) rawOrg = rawOrg.replace(new RegExp(p, 'gi'), '').trim()
   const cleanOrg = rawOrg.replace(/[^a-zA-Z0-9\s\-\.\,&()]/g, '').replace(/^[\s\-]+|[\s\-]+$/g, '').slice(0, 100)
-  const orgContext = cleanOrg.length > 2 ? `at "${cleanOrg}"` : 'in Washington State government procurement'
 
-  // Search term mirrors exactly what the Google button uses — no quotes, add org context
-  const searchTerm = isEmail
-    ? `${cleanName} ${cleanOrg} Washington`
-    : `${cleanName} ${cleanOrg} Washington`
+  // Search term — no quotes, matches Google button exactly
+  const searchTerm = `${cleanName} ${cleanOrg} Washington`.trim()
 
-  const searchPrompt = `Search the web for: ${searchTerm}
+  const prompt = `Search the web for: ${searchTerm}
 
-Read every snippet in the search results carefully. The first result will likely contain the answer.
+Read the search result snippets. Extract any phone number, email, job title, and full name you find that belongs to this person.
 
-Copy any of the following directly from the snippets into the JSON below:
-- Full name of the person
-- Their job title
-- Their phone number (e.g. 360-885-6527 or (360) 885-6527)
-- Their email address
-
-Return ONLY this JSON, nothing else:
+Reply with ONLY this JSON — no other text:
 {"name": null, "title": null, "phone": null, "email": null}
 
-If a value appears in the snippets, put it in. Only use null if it is truly not in any snippet.`
+Fill in what you find. Use null only if it is genuinely absent from the results.`
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 2048,
-        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-        messages: [{ role: 'user', content: searchPrompt }]
-      })
-    })
+    const apiKey = process.env.ANTHROPIC_API_KEY
 
-    if (!response.ok) {
-      return res.status(500).json({ error: 'Lookup service unavailable' })
+    // Turn 1: send prompt
+    const messages = [{ role: 'user', content: prompt }]
+    let data = await callClaude(messages, apiKey)
+
+    // Turn 2: if Claude stopped to use the tool, complete the tool call and get final answer
+    if (data.stop_reason === 'tool_use') {
+      const assistantContent = data.content
+      const toolUseBlock = assistantContent.find(b => b.type === 'tool_use')
+
+      if (toolUseBlock) {
+        messages.push({ role: 'assistant', content: assistantContent })
+        messages.push({
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: toolUseBlock.id,
+            content: 'Search complete. Now extract the contact details and return the JSON.'
+          }]
+        })
+        data = await callClaude(messages, apiKey)
+      }
     }
 
-    const data = await response.json()
-    // Extract the final text block — comes after tool use blocks
-    const textBlock = (data.content || []).filter(b => b.type === 'text').pop()
-    const text = textBlock?.text || '{}'
-    const clean = text.replace(/```json|```/g, '').trim()
+    // Parse the final text block
+    const textBlocks = (data.content || []).filter(b => b.type === 'text')
+    const lastText = textBlocks[textBlocks.length - 1]?.text || ''
+    const parsed = extractJson(lastText)
 
-    const jsonMatch = clean.match(/\{[\s\S]*\}/)
-    if (!jsonMatch) {
-      return res.status(200).json({ email: null, phone: null, title: null, name: null })
+    if (!parsed) {
+      return res.status(200).json({ name: null, email: null, phone: null, title: null })
     }
-
-    const parsed = JSON.parse(jsonMatch[0])
 
     return res.status(200).json({
-      name:  typeof parsed.name  === 'string' && parsed.name  !== 'null' ? parsed.name.trim()  : null,
-      email: typeof parsed.email === 'string' && parsed.email !== 'null' ? parsed.email.trim() : null,
-      phone: typeof parsed.phone === 'string' && parsed.phone !== 'null' ? parsed.phone.trim() : null,
-      title: typeof parsed.title === 'string' && parsed.title !== 'null' ? parsed.title.trim() : null,
+      name:  safeStr(parsed.name),
+      email: safeStr(parsed.email),
+      phone: safeStr(parsed.phone),
+      title: safeStr(parsed.title),
     })
 
   } catch (e) {
