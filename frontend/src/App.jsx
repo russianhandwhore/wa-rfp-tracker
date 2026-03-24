@@ -144,17 +144,17 @@ export default function App() {
   }
 
   async function openContactModal(rfp) {
-    const name = rfp.contact_name
-    // Use actual agency/department — never fall back to source_name (platform name)
+    const name = rfp.contact_name || null
     const agency = rfp.agency || ''
     const dept = rfp.department || ''
     const displayOrg = agency || dept || 'Washington State Government'
 
-    const googleQuery = [name, agency || dept, 'Washington State procurement'].filter(Boolean).join(' ')
+    const searchName = name || agency  // use org name if no personal name
+    const googleQuery = [searchName, 'Washington State procurement'].filter(Boolean).join(' ')
     const linkedinQuery = [name, agency || dept, 'Washington'].filter(Boolean).join(' ')
 
     setContactModal({
-      name,
+      name: name || rfp.contact_email || 'Contact',
       agency: displayOrg,
       department: dept || null,
       email: rfp.contact_email || null,
@@ -162,21 +162,24 @@ export default function App() {
       linkedinUrl: 'https://www.linkedin.com/search/results/people/?keywords=' + encodeURIComponent(linkedinQuery),
     })
     setContactInfo(null)
-    setContactLoading(true)
 
-    try {
-      const res = await fetch('/api/contact', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, agency, department: dept })
-      })
-      if (!res.ok) throw new Error('Failed')
-      const parsed = await res.json()
-      setContactInfo(parsed)
-    } catch (e) {
-      setContactInfo({ _error: true })
+    // Only run AI lookup if we have a real person name to search for
+    if (name) {
+      setContactLoading(true)
+      try {
+        const res = await fetch('/api/contact', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, agency, department: dept })
+        })
+        if (!res.ok) throw new Error('Failed')
+        const parsed = await res.json()
+        setContactInfo(parsed)
+      } catch (e) {
+        setContactInfo({ _error: true })
+      }
+      setContactLoading(false)
     }
-    setContactLoading(false)
   }
 
   function scrollToSearch() {
@@ -265,10 +268,10 @@ export default function App() {
                       <div><p className="text-xs text-gray-400">Title</p><p className="text-sm font-medium text-gray-800">{contactInfo.title}</p></div>
                     </div>
                   )}
-                  {contactInfo.email && contactInfo.email !== 'null' && (
-                    <a href={'mailto:' + contactInfo.email} className="flex items-center gap-3 p-3 bg-gray-50 hover:bg-red-50 rounded-xl transition-colors group">
+                  {(contactInfo.email && contactInfo.email !== 'null' ? contactInfo.email : contactModal.email) && (
+                    <a href={'mailto:' + (contactInfo.email && contactInfo.email !== 'null' ? contactInfo.email : contactModal.email)} className="flex items-center gap-3 p-3 bg-gray-50 hover:bg-red-50 rounded-xl transition-colors group">
                       <span className="text-lg">📧</span>
-                      <div><p className="text-xs text-gray-400">Email</p><p className="text-sm font-medium text-red-600 group-hover:underline">{contactInfo.email}</p></div>
+                      <div><p className="text-xs text-gray-400">Email</p><p className="text-sm font-medium text-red-600 group-hover:underline">{contactInfo.email && contactInfo.email !== 'null' ? contactInfo.email : contactModal.email}</p></div>
                     </a>
                   )}
                   {contactInfo.phone && contactInfo.phone !== 'null' && (
@@ -277,12 +280,17 @@ export default function App() {
                       <div><p className="text-xs text-gray-400">Phone</p><p className="text-sm font-medium text-red-600 group-hover:underline">{contactInfo.phone}</p></div>
                     </a>
                   )}
-                  {!contactInfo.email && !contactInfo.phone && !contactInfo.title && (
+                  {!contactInfo.email && !contactInfo.phone && !contactInfo.title && !contactModal.email && (
                     <p className="text-xs text-gray-400 text-center py-2 bg-gray-50 rounded-xl p-3">No details found automatically — try searching below</p>
                   )}
                 </div>
               ) : contactInfo?._error ? (
                 <p className="text-xs text-gray-400 text-center py-2 bg-gray-50 rounded-xl p-3">Could not load contact details — use the search buttons below</p>
+              ) : contactModal.email ? (
+                <a href={'mailto:' + contactModal.email} className="flex items-center gap-3 p-3 bg-gray-50 hover:bg-red-50 rounded-xl transition-colors group">
+                  <span className="text-lg">📧</span>
+                  <div><p className="text-xs text-gray-400">Email</p><p className="text-sm font-medium text-red-600 group-hover:underline">{contactModal.email}</p></div>
+                </a>
               ) : null}
 
               <div>
