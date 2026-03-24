@@ -13,7 +13,9 @@ Phases → status:
   In Development → upcoming (future — not yet advertised)
 """
 
+import io
 import requests
+import re
 import json
 from datetime import datetime
 import sys
@@ -76,79 +78,104 @@ def parse_date(val):
     return None
 
 
-def detect_section(text):
-    """Return section key from a line of text."""
-    t = text.lower().strip()
-    if "architecture and engineering" in t:
-        return "ae"
-    if "construction" in t:
-        return "construction"
-    if "materials, technology" in t or "materials technology" in t:
-        return "mts"
-    return None
+PROC_ID_PAT = r'([A-Z]{1,8}[\-/CM]*\s*\d{2,5}[\-/]\d{2,3}(?:[\-/]\d)?|SA\d{5,})'
+PROCESS_PAT = r'(Request for Proposal|Request for Qualifications|Invitation for Bid \(IFB\)|Competitive Bid|Invitation for Bid)'
+PHASE_PAT   = r'(Evaluating|Advertising|In Development)'
+DATE_PAT    = r'(\d{2}/\d{2}/\d{2}|\d{2}/\d{2}/\d{4}|TBD)'
+
+ROW_RE = re.compile(
+    rf'^(.+?)\s+{PROC_ID_PAT}\s+{PROCESS_PAT}\s+{PHASE_PAT}\s*'
+    rf'(?:{DATE_PAT})?\s*(?:{DATE_PAT})?\s*(?:{DATE_PAT})?\s*(?:{DATE_PAT})?',
+    re.MULTILINE
+)
+
+SECTION_RE = re.compile(
+    r'(Materials,\s*Technology|Architecture and Engineering|^Construction$|^DESIGN & CONSTRUCTION$|^Construction)',
+    re.IGNORECASE | re.MULTILINE
+)
+
+PROC_ID_ANYWHERE = re.compile(
+    r'[A-Z]{1,8}[\-/CM]*\s*\d{2,5}[\-/]\d{2,3}(?:[\-/]\d)?|SA\d{5,}'
+)
+
+SKIP_LINE_RE = re.compile(
+    r'^(procurement title|procurement id|this report|for questions|noa\s*[\-\u2013]|noia\s*[\-\u2013]|'
+    r'refresh date|snapshot|future dates|pre-bid meeting|submittal due)',
+    re.IGNORECASE
+)
 
 
-def is_header_row(cells):
-    """Skip table header rows."""
-    joined = " ".join(str(c or "").lower() for c in cells)
-    return any(k in joined for k in [
-        "procurement title", "procurement id", "phase", "solicitation"
-    ])
+def normalize_lines(full_text):
+    """Join continuation lines where a long title is split across two lines."""
+    raw_lines = full_text.split("\n")
+    merged = []
+    i = 0
+    while i < len(raw_lines):
+        line = raw_lines[i].strip()
+        if not line:
+            i += 1
+            continue
+        if SKIP_LINE_RE.match(line):
+            i += 1
+            continue
+        next_line = raw_lines[i + 1].strip() if i + 1 < len(raw_lines) else ""
+        if (not PROC_ID_ANYWHERE.search(line) and
+                next_line and
+                PROC_ID_ANYWHERE.search(next_line) and
+                not SKIP_LINE_RE.match(next_line)):
+            merged.append(line + " " + next_line)
+            i += 2
+        else:
+            merged.append(line)
+            i += 1
+    return merged
 
 
 def extract_rows_from_pdf(pdf_bytes):
-    import io
     rows = []
     current_section = "mts"
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        full_text = ""
         for page in pdf.pages:
-            page_text = page.extract_text() or ""
-            for line in page_text.split("\n"):
-                sec = detect_section(line)
-                if sec:
-                    current_section = sec
+            full_text += (page.extract_text() or "") + "\n"
 
-            tables = page.extract_tables()
-            for table in tables:
-                for row in table:
-                    if not row or len(row) < 2:
-                        continue
-                    cells = [str(c or "").strip() for c in row]
+    for line in normalize_lines(full_text):
+        sec_m = SECTION_RE.search(line)
+        if sec_m:
+            sec_text = sec_m.group(0).lower()
+            if "architecture" in sec_text:
+                current_section = "ae"
+            elif "construction" in sec_text:
+                current_section = "construction"
+            elif "materials" in sec_text:
+                current_section = "mts"
 
-                    sec = detect_section(cells[0])
-                    if sec:
-                        current_section = sec
-                        continue
+        m = ROW_RE.match(line)
+        if not m:
+            continue
 
-                    if is_header_row(cells):
-                        continue
+        title    = clean_text(m.group(1))
+        proc_id  = clean_text(m.group(2))
+        process  = clean_text(m.group(3))
+        phase    = clean_text(m.group(4)).lower()
+        dates    = [m.group(i) for i in range(5, 9) if m.group(i) and m.group(i) != "TBD"]
 
-                    title = cells[0] if cells else ""
-                    if not title or len(title) < 4:
-                        continue
-                    if any(k in title.lower() for k in [
-                        "this report", "for questions", "noa -", "noia -",
-                        "refresh date", "snapshot", "future dates"
-                    ]):
-                        continue
-
-                    while len(cells) < 8:
-                        cells.append("")
-
-                    rows.append({
-                        "title":             clean_text(cells[0]),
-                        "proc_id":           clean_text(cells[1]),
-                        "process":           clean_text(cells[2]),
-                        "phase":             clean_text(cells[3]).lower(),
-                        "solicitation_date": parse_date(cells[4]),
-                        "prebid_date":       parse_date(cells[5]),
-                        "submittal_due":     parse_date(cells[6]),
-                        "noia_noa":          parse_date(cells[7]),
-                        "section":           current_section,
-                    })
+        rows.append({
+            "title":             title,
+            "proc_id":           proc_id,
+            "process":           process,
+            "phase":             phase,
+            "solicitation_date": parse_date(dates[0]) if len(dates) > 0 else None,
+            "prebid_date":       parse_date(dates[1]) if len(dates) > 1 else None,
+            "submittal_due":     parse_date(dates[2]) if len(dates) > 2 else None,
+            "noia_noa":          parse_date(dates[3]) if len(dates) > 3 else None,
+            "section":           current_section,
+        })
 
     return rows
+
+
 def build_records(rows):
     """Convert extracted rows to RFP records."""
     rfps = []
@@ -172,7 +199,7 @@ def build_records(rows):
                 phase_info = v
                 break
         if not phase_info:
-                phase_info = {"status": "active", "label": phase_key.title()}
+            phase_info = {"status": "active", "label": phase_key.title()}
 
         contact_email = CONTACT_BY_SECTION.get(row["section"], "MTSprocurementhelp@soundtransit.org")
 
