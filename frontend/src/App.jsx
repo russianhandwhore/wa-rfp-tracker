@@ -9,10 +9,10 @@ const supabase = createClient(
 const PLATFORMS = ['All', 'WEBS', 'OpenGov', 'Procureware', 'Sound Transit', 'PublicPurchase', 'SAP_Ariba', 'Oracle', 'Bonfire', 'Workday', 'Biddingo', 'Standalone']
 const CATEGORIES = ['All', 'IT', 'Construction', 'Supplies', 'Services', 'Misc']
 const SORT_OPTIONS = [
+  { label: 'Newest First', value: 'created_at_desc' },
+  { label: 'Oldest First', value: 'created_at_asc' },
   { label: 'Due Soonest', value: 'due_date_asc' },
   { label: 'Due Latest', value: 'due_date_desc' },
-  { label: 'Newest Added', value: 'created_at_desc' },
-  { label: 'Oldest Added', value: 'created_at_asc' },
 ]
 const PER_PAGE = 25
 
@@ -36,7 +36,7 @@ export default function App() {
   const [search, setSearch] = useState('')
   const [platform, setPlatform] = useState('All')
   const [category, setCategory] = useState('All')
-  const [sortBy, setSortBy] = useState('due_date_asc')
+  const [sortBy, setSortBy] = useState('created_at_desc')
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
   const [nearTotal, setNearTotal] = useState(0)
@@ -60,15 +60,19 @@ export default function App() {
   async function fetchRfps() {
     setLoading(true)
 
-    const now = new Date().toISOString()
-    const hundredDaysFromNow = new Date(Date.now() + 100 * 24 * 60 * 60 * 1000).toISOString()
+    const sortMap = {
+      'created_at_desc':  { col: 'created_at', asc: false, nullsFirst: false },
+      'created_at_asc':   { col: 'created_at', asc: true,  nullsFirst: false },
+      'due_date_asc':     { col: 'due_date',   asc: true,  nullsFirst: false },
+      'due_date_desc':    { col: 'due_date',   asc: false, nullsFirst: false },
+    }
+    const sort = sortMap[sortBy] || sortMap['created_at_desc']
 
     let query = supabase
       .from('rfps')
       .select('*', { count: 'exact' })
       .in('status', ['active', 'upcoming'])
-      .or(`due_date.gte.${now},due_date.is.null`)
-      .order('due_date', { ascending: false, nullsFirst: false })
+      .order(sort.col, { ascending: sort.asc, nullsFirst: sort.nullsFirst })
       .range((page - 1) * PER_PAGE, page * PER_PAGE - 1)
 
     if (search) query = query.ilike('title', '%' + search + '%')
@@ -77,17 +81,8 @@ export default function App() {
 
     const { data, count, error } = await query
     if (!error) {
-      const safe = (data || []).filter(r => {
-        if (r.status === 'upcoming') return true
-        const d = getDaysLeft(r.due_date)
-        return d !== null && d >= 1
-      })
-      safe.sort((a, b) => {
-        if (a.status === 'upcoming' && b.status !== 'upcoming') return 1
-        if (b.status === 'upcoming' && a.status !== 'upcoming') return -1
-        return getDaysLeft(b.due_date) - getDaysLeft(a.due_date)
-      })
-      setRfps(safe)
+      const filtered = (data || []).filter(r => !isBlankCard(r))
+      setRfps(filtered)
       setTotal(count || 0)
     }
     setLoading(false)
@@ -468,10 +463,8 @@ export default function App() {
                 const daysLeft = getDaysLeft(rfp.due_date)
                 const docs = getDocuments(rfp)
                 const hasDocuments = rfp.source_platform === 'Procureware'
-                const isFarOut = daysLeft !== null && daysLeft > 100
-
                 return (
-                  <div key={rfp.id} className={"bg-white rounded-xl border p-5 hover:shadow-md transition-all group " + (isFarOut ? "border-gray-100 opacity-75" : "border-gray-200 hover:border-red-300")}>
+                  <div key={rfp.id} className="bg-white rounded-xl border border-gray-200 p-5 hover:shadow-md hover:border-red-300 transition-all group">
                     <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-2 flex-wrap">
@@ -513,7 +506,7 @@ export default function App() {
                       <div className="flex flex-row md:flex-col items-center md:items-end gap-3 md:gap-2 md:min-w-36 flex-shrink-0">
                         <div className="text-right">
                           <div className="text-xs text-gray-400 uppercase tracking-wide mb-1">Due Date</div>
-                          <div className={"text-sm font-bold " + (isFarOut ? "text-gray-400" : "text-gray-800")}>{formatDate(rfp.due_date)}</div>
+                          <div className={"text-sm font-bold text-gray-800"}>{formatDate(rfp.due_date)}</div>
                           {daysLeft !== null && (
                             <div className={"text-xs mt-0.5 " + getDaysColor(daysLeft)}>
                               {daysLeft < 0 ? 'Expired' : daysLeft === 0 ? 'Due today!' : daysLeft + ' days left'}
