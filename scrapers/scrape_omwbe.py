@@ -11,6 +11,7 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import re
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -68,7 +69,7 @@ def fetch_detail(detail_url):
     try:
         resp = requests.get(detail_url, headers=HEADERS, timeout=15)
         if resp.status_code != 200:
-            return None, None
+            return None, None, None, None
         soup = BeautifulSoup(resp.text, "lxml")
 
         # Remove nav/header/footer/sidebar noise
@@ -80,11 +81,10 @@ def fetch_detail(detail_url):
         # Common patterns: .field-label contains "Organization", next sibling is value
         # Or the page text contains "Organization: SomeName"
         organization = None
-        import re as _re
         page_text = soup.get_text(" ", strip=True)
-        org_m = _re.search(
+        org_m = re.search(
             r"Organization\s*[:\-]\s*(.{3,100}?)(?:\s{2,}|Closing|Point|Description|$)",
-            page_text, _re.IGNORECASE
+            page_text, re.IGNORECASE
         )
         if org_m:
             org = clean_text(org_m.group(1))
@@ -130,24 +130,40 @@ def fetch_detail(detail_url):
             if best:
                 description = best[:MAX_DESC_CHARS]
 
-        # Contact name: OMWBE requires "Point of Contact" on every bid post
+        # Contact: OMWBE "Point of Contact" field often contains an email directly
+        # e.g. "Point of Contact: barb.wakefield@parkstacoma.gov"
+        # or "Point of Contact: Jane Smith"
         contact_name = None
-        contact_m = _re.search(
-            r"(?:Point of Contact|Contact)\s*[:\-]\s*(.{2,80}?)(?:\s{2,}|Email|Phone|Closing|$)",
-            page_text, _re.IGNORECASE
-        )
-        if contact_m:
-            candidate = clean_text(contact_m.group(1))
-            # Must look like a name — at least 2 words, no URLs or emails
-            words = candidate.split()
-            if 2 <= len(words) <= 5 and "@" not in candidate and "http" not in candidate:
-                contact_name = candidate
+        contact_email = None
 
-        return description, organization, contact_name
+        # Extract email anywhere in the page text
+        email_m = re.search(
+            r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", page_text
+        )
+        if email_m:
+            contact_email = email_m.group(0).lower()
+
+        # Extract Point of Contact value — may be a name, email, or both
+        poc_m = re.search(
+            r"Point of Contact\s*[:\-]\s*(.{2,120}?)(?:\s{2,}|$|\n)",
+            page_text, re.IGNORECASE
+        )
+        if poc_m:
+            candidate = clean_text(poc_m.group(1))
+            if "@" in candidate:
+                # Email only — store as email, leave name as None
+                if not contact_email:
+                    contact_email = candidate.lower()
+            else:
+                words = candidate.split()
+                if 2 <= len(words) <= 6 and "http" not in candidate:
+                    contact_name = candidate
+
+        return description, organization, contact_name, contact_email
 
     except Exception as e:
         print(f"  [WARN] Detail fetch failed {detail_url}: {e}")
-        return None, None, None
+        return None, None, None, None
 
 
 def scrape_listings():
@@ -223,14 +239,14 @@ def scrape_listings():
         for future in as_completed(future_to_url):
             url = future_to_url[future]
             try:
-                desc, org, contact = future.result()
+                desc, org, contact, email = future.result()
             except Exception:
-                desc, org, contact = None, None, None
-            details[url] = (desc, org, contact)
+                desc, org, contact, email = None, None, None, None
+            details[url] = (desc, org, contact, email)
 
     # Build final records
     for rec in base_records:
-        desc, org, contact = details.get(rec["detail_url"], (None, None, None))
+        desc, org, contact, email = details.get(rec["detail_url"], (None, None, None, None))
 
         rfp = {
             "title": rec["title"],
@@ -239,13 +255,13 @@ def scrape_listings():
             "description": desc,
             "agency": org,
             "contact_name": contact,
+            "contact_email": email,
             "source_url": SOURCE_URL,
             "source_name": SOURCE_NAME,
             "source_platform": SOURCE_PLATFORM,
             "status": "active",
             "department": None,
             "ref_number": None,
-            "contact_email": None,
             "posted_date": None,
             "rfp_type": None,
             "includes_inclusion_plan": False,
@@ -253,12 +269,17 @@ def scrape_listings():
             "raw_data": None,
             "fingerprint": rec["fingerprint"],
         }
+        if len(rfps) <= 5:
+            print(f"  [{len(rfps)}] title={str(rfp.get('title',''))[:40]}")
+            print(f"      org={rfp.get('agency')} | contact={rfp.get('contact_name')} | email={rfp.get('contact_email')}")
         rfps.append(rfp)
 
     has_desc = sum(1 for r in rfps if r.get("description"))
     has_org = sum(1 for r in rfps if r.get("agency"))
-    print(f"  With description: {has_desc}/{len(rfps)}")
+    has_contact = sum(1 for r in rfps if r.get("contact_name") or r.get("contact_email"))
+    print(f"  With description:  {has_desc}/{len(rfps)}")
     print(f"  With organization: {has_org}/{len(rfps)}")
+    print(f"  With contact:      {has_contact}/{len(rfps)}")
 
     return rfps
 

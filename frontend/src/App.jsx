@@ -477,10 +477,10 @@ export default function App() {
 
                         <div className="flex items-center gap-4 text-xs text-gray-400 flex-wrap">
                           {rfp.ref_number && <span><span className="font-medium text-gray-500">Ref:</span> {rfp.ref_number}</span>}
-                          {rfp.contact_name && (
+                          {(rfp.contact_name || rfp.contact_email) && (
                             <button onClick={() => openContactModal(rfp)} className="flex items-center gap-1 hover:text-red-600 transition-colors group/c">
                               <span className="font-medium text-gray-500 group-hover/c:text-red-500">Contact:</span>
-                              <span className="underline decoration-dotted underline-offset-2">{rfp.contact_name}</span>
+                              <span className="underline decoration-dotted underline-offset-2">{rfp.contact_name || rfp.contact_email}</span>
                               <svg className="w-3 h-3 text-gray-300 group-hover/c:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
                             </button>
                           )}
