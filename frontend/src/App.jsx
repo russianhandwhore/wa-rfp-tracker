@@ -6,7 +6,7 @@ const supabase = createClient(
   import.meta.env.VITE_SUPABASE_ANON_KEY
 )
 
-const PLATFORMS = ['All', 'WEBS', 'OpenGov', 'Procureware', 'PublicPurchase', 'SAP_Ariba', 'Oracle', 'Bonfire', 'Workday', 'Biddingo', 'Standalone']
+const PLATFORMS = ['All', 'WEBS', 'OpenGov', 'Procureware', 'Sound Transit', 'PublicPurchase', 'SAP_Ariba', 'Oracle', 'Bonfire', 'Workday', 'Biddingo', 'Standalone']
 const CATEGORIES = ['All', 'IT', 'Construction', 'Supplies', 'Services', 'Misc']
 const SORT_OPTIONS = [
   { label: 'Due Soonest', value: 'due_date_asc' },
@@ -66,12 +66,9 @@ export default function App() {
     let query = supabase
       .from('rfps')
       .select('*', { count: 'exact' })
-      .eq('status', 'active')
-      // Only show RFPs due within 100 days from now
-      .gte('due_date', now)
-      .lte('due_date', hundredDaysFromNow)
-      // Sort by due_date descending = most days left first (e.g. 80 days before 70)
-      .order('due_date', { ascending: false })
+      .in('status', ['active', 'upcoming'])
+      .or(`due_date.gte.${now},due_date.is.null`)
+      .order('due_date', { ascending: false, nullsFirst: false })
       .range((page - 1) * PER_PAGE, page * PER_PAGE - 1)
 
     if (search) query = query.ilike('title', '%' + search + '%')
@@ -80,13 +77,16 @@ export default function App() {
 
     const { data, count, error } = await query
     if (!error) {
-      // Client-side safety filter — blocks >100 day items even if DB query returns them
       const safe = (data || []).filter(r => {
+        if (r.status === 'upcoming') return true
         const d = getDaysLeft(r.due_date)
-        return d !== null && d >= 1 && d <= 100
+        return d !== null && d >= 1
       })
-      // Sort descending: most days left first
-      safe.sort((a, b) => getDaysLeft(b.due_date) - getDaysLeft(a.due_date))
+      safe.sort((a, b) => {
+        if (a.status === 'upcoming' && b.status !== 'upcoming') return 1
+        if (b.status === 'upcoming' && a.status !== 'upcoming') return -1
+        return getDaysLeft(b.due_date) - getDaysLeft(a.due_date)
+      })
       setRfps(safe)
       setTotal(count || 0)
     }
@@ -477,6 +477,14 @@ export default function App() {
                         <div className="flex items-center gap-2 mb-2 flex-wrap">
                           <span className="text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: '#FFF0F0', color: '#CC0000' }}>{rfp.source_platform}</span>
                           {rfp.agency && <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-gray-100 text-gray-600">{rfp.agency}</span>}
+                          {rfp.source_platform === 'Sound Transit' && (() => {
+                            const phase = (() => { try { return JSON.parse(rfp.raw_data || '{}').phase_label } catch { return null } })()
+                            if (!phase) return null
+                            if (phase === 'Upcoming') return <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200">🔮 Upcoming</span>
+                            if (phase === 'Advertising') return <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-green-50 text-green-700 border border-green-200">📢 Advertising</span>
+                            if (phase === 'Evaluating') return <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-yellow-50 text-yellow-700 border border-yellow-200">⏳ Evaluating</span>
+                            return null
+                          })()}
                           {rfp.categories && rfp.categories.map(cat => (
                             <span key={cat} className={"text-xs font-medium px-2.5 py-1 rounded-full border " + getCategoryColor(cat)}>
                               {cat === 'IT' ? '💻 IT' : cat === 'Construction' ? '🏗️ Construction' : cat === 'Supplies' ? '📦 Supplies' : cat === 'Services' ? '🤝 Services' : '📋 Misc'}
