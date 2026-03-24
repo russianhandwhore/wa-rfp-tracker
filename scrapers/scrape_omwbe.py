@@ -2,13 +2,15 @@
 OMWBE Bids & Contracting Opportunities Scraper
 Source: https://omwbe.wa.gov/small-business-assistance/bids-contracting-opportunities
 
-Static Drupal CMS page — no JS rendering required.
-Table has two columns: Project (title + link) | Closing Date
+Static Drupal CMS — requests + BeautifulSoup only, no Playwright.
+Listing page: title + closing date + detail URL
+Detail pages: description (max 320 chars) + organization/agency
 """
 
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -18,6 +20,8 @@ SOURCE_URL = "https://omwbe.wa.gov/small-business-assistance/bids-contracting-op
 BASE_URL = "https://omwbe.wa.gov"
 SOURCE_NAME = "OMWBE - Office of Minority and Women's Business Enterprises"
 SOURCE_PLATFORM = "OMWBE"
+MAX_DESC_CHARS = 320
+DETAIL_WORKERS = 10  # concurrent detail page fetches
 
 HEADERS = {
     "User-Agent": (
@@ -27,9 +31,16 @@ HEADERS = {
     ),
 }
 
+# Known nav/footer noise to strip from description
+NOISE_PHRASES = [
+    "OMWBE Academy", "Bids & Contracting Opportunities",
+    "Doing Business with Government", "Supplier Diversity",
+    "Small Business Assistance", "Skip to main content",
+    "Select language", "Calendar of Events",
+]
+
 
 def parse_date(date_str):
-    """Parse MM/DD/YY date format from OMWBE table."""
     if not date_str:
         return None
     s = date_str.strip()
@@ -42,39 +53,123 @@ def parse_date(date_str):
     return None
 
 
+def fingerprint_from_url(detail_url):
+    """Hash the detail URL to make a short unique fingerprint."""
+    slug = detail_url.rstrip("/").split("/")[-1]
+    return generate_fingerprint(slug, "OMWBE", "")
+
+
+def fetch_detail(detail_url):
+    """
+    Fetch one OMWBE detail page and extract description + organization.
+    Returns (description, organization) — both may be None.
+    Never raises — bad pages return (None, None).
+    """
+    try:
+        resp = requests.get(detail_url, headers=HEADERS, timeout=15)
+        if resp.status_code != 200:
+            return None, None
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        # Remove nav/header/footer/sidebar noise
+        for tag in soup.find_all(["nav", "header", "footer",
+                                   "script", "style", "aside"]):
+            tag.decompose()
+
+        # Organization: Drupal renders fields as label+value pairs.
+        # Common patterns: .field-label contains "Organization", next sibling is value
+        # Or the page text contains "Organization: SomeName"
+        organization = None
+        import re as _re
+        page_text = soup.get_text(" ", strip=True)
+        org_m = _re.search(
+            r"Organization\s*[:\-]\s*(.{3,100}?)(?:\s{2,}|Closing|Point|Description|$)",
+            page_text, _re.IGNORECASE
+        )
+        if org_m:
+            org = clean_text(org_m.group(1))
+            if org and len(org) < 100:
+                organization = org
+        # Fallback: Drupal field-label div
+        if not organization:
+            for label_tag in soup.find_all(class_=lambda c: c and "field-label" in c):
+                if "organization" in label_tag.get_text().lower():
+                    value_tag = label_tag.find_next_sibling()
+                    if value_tag:
+                        org = clean_text(value_tag.get_text())
+                        if org and len(org) < 100:
+                            organization = org
+                            break
+
+        # Description: main content area — longest meaningful text block
+        # Try Drupal field__item / node body selectors first
+        description = None
+        for sel in [
+            ".field--name-body", ".field-name-body",
+            ".field--name-field-description", ".node__content",
+            "article", ".view-mode-full",
+        ]:
+            tag = soup.select_one(sel)
+            if tag:
+                text = clean_text(tag.get_text(" ", strip=True))
+                # Strip known noise
+                for noise in NOISE_PHRASES:
+                    text = text.replace(noise, "")
+                text = " ".join(text.split()).strip()
+                if len(text) > 40:
+                    description = text[:MAX_DESC_CHARS]
+                    break
+
+        # Fallback: longest paragraph
+        if not description:
+            best = ""
+            for p in soup.find_all("p"):
+                text = clean_text(p.get_text())
+                if len(text) > len(best) and len(text) > 40:
+                    best = text
+            if best:
+                description = best[:MAX_DESC_CHARS]
+
+        return description, organization
+
+    except Exception as e:
+        print(f"  [WARN] Detail fetch failed {detail_url}: {e}")
+        return None, None
+
+
 def scrape_listings():
-    """Fetch and parse the OMWBE bids listing page."""
+    """Fetch listing page, then fetch detail pages concurrently."""
     rfps = []
 
-    print(f"  Fetching {SOURCE_URL}...")
+    print(f"  Fetching listing page...")
     try:
         resp = requests.get(SOURCE_URL, headers=HEADERS, timeout=20)
         resp.raise_for_status()
     except Exception as e:
-        print(f"  [ERROR] Could not fetch OMWBE page: {e}")
+        print(f"  [ERROR] Could not fetch OMWBE listing: {e}")
         return rfps
 
     print(f"  Status: {resp.status_code} | {len(resp.text)} chars")
-
     soup = BeautifulSoup(resp.text, "lxml")
 
-    # Bids are in a <table> with two columns: Project | Closing Date
     table = soup.find("table")
     if not table:
         print("  [ERROR] No table found on OMWBE page")
         return rfps
 
     rows = table.find_all("tr")
-    print(f"  Found {len(rows)} table rows (including header)")
+    print(f"  Found {len(rows)} rows (including header)")
+
+    # Build base records from listing
+    base_records = []
+    seen_slugs = set()
 
     for row in rows:
         cells = row.find_all("td")
         if len(cells) < 2:
-            continue  # skip header row
+            continue
 
-        # Column 0: title + link
-        title_cell = cells[0]
-        link = title_cell.find("a", href=True)
+        link = cells[0].find("a", href=True)
         if not link:
             continue
 
@@ -83,26 +178,58 @@ def scrape_listings():
             continue
 
         href = link["href"]
-        detail_url = (
-            href if href.startswith("http")
-            else BASE_URL + href
-        )
+        detail_url = href if href.startswith("http") else BASE_URL + href
 
-        # Column 1: closing date
-        date_text = clean_text(cells[1].get_text())
-        due_date = parse_date(date_text)
+        # Deduplicate by slug
+        slug = fingerprint_from_url(detail_url)
+        if slug in seen_slugs:
+            continue
+        seen_slugs.add(slug)
 
-        rfp = {
+        due_date = parse_date(clean_text(cells[1].get_text()))
+
+        base_records.append({
             "title": title,
             "detail_url": detail_url,
             "due_date": due_date,
+            "fingerprint": slug,
+        })
+
+    print(f"  {len(base_records)} unique listings found")
+    if not base_records:
+        return rfps
+
+    # Fetch detail pages concurrently
+    print(f"  Fetching {len(base_records)} detail pages ({DETAIL_WORKERS} at a time)...")
+    details = {}
+    with ThreadPoolExecutor(max_workers=DETAIL_WORKERS) as executor:
+        future_to_url = {
+            executor.submit(fetch_detail, r["detail_url"]): r["detail_url"]
+            for r in base_records
+        }
+        for future in as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                desc, org = future.result()
+            except Exception:
+                desc, org = None, None
+            details[url] = (desc, org)
+
+    # Build final records
+    for rec in base_records:
+        desc, org = details.get(rec["detail_url"], (None, None))
+
+        rfp = {
+            "title": rec["title"],
+            "detail_url": rec["detail_url"],
+            "due_date": rec["due_date"],
+            "description": desc,
+            "agency": org,
             "source_url": SOURCE_URL,
             "source_name": SOURCE_NAME,
             "source_platform": SOURCE_PLATFORM,
             "status": "active",
-            "agency": None,
             "department": None,
-            "description": None,
             "ref_number": None,
             "contact_name": None,
             "contact_email": None,
@@ -111,15 +238,14 @@ def scrape_listings():
             "includes_inclusion_plan": False,
             "categories": [],
             "raw_data": None,
+            "fingerprint": rec["fingerprint"],
         }
-
-        rfp["fingerprint"] = generate_fingerprint(
-            rfp["title"],
-            SOURCE_PLATFORM,
-            rfp["due_date"] or "",
-        )
-
         rfps.append(rfp)
+
+    has_desc = sum(1 for r in rfps if r.get("description"))
+    has_org = sum(1 for r in rfps if r.get("agency"))
+    print(f"  With description: {has_desc}/{len(rfps)}")
+    print(f"  With organization: {has_org}/{len(rfps)}")
 
     return rfps
 
@@ -134,13 +260,14 @@ def run():
 
     try:
         all_rfps = scrape_listings()
-        print(f"Total OMWBE listings scraped: {len(all_rfps)}")
+        print(f"Total OMWBE listings: {len(all_rfps)}")
 
         if all_rfps:
             s = all_rfps[0]
-            print(f"  Sample title:   {str(s.get('title', ''))[:60]}")
-            print(f"  Sample due:     {s.get('due_date')}")
-            print(f"  Sample url:     {s.get('detail_url')}")
+            print(f"  Sample title: {str(s.get('title', ''))[:60]}")
+            print(f"  Sample due:   {s.get('due_date')}")
+            print(f"  Sample org:   {s.get('agency')}")
+            print(f"  Sample desc:  {str(s.get('description', ''))[:80]}")
 
         if all_rfps:
             batch_size = 50
