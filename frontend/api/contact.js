@@ -61,24 +61,25 @@ export default async function handler(req, res) {
   const cleanOrg = rawOrg.replace(/[^a-zA-Z0-9\s\-\.\,&()]/g, '').replace(/^[\s\-]+|[\s\-]+$/g, '').slice(0, 100)
   const orgContext = cleanOrg.length > 2 ? `at "${cleanOrg}"` : 'in Washington State government procurement'
 
-  // Two-step: search, then extract phone/email/name from raw results
+  // Search term mirrors exactly what the Google button uses — no quotes, add org context
   const searchTerm = isEmail
-    ? `"${cleanName}"`
-    : `"${cleanName}" ${cleanOrg} Washington`
+    ? `${cleanName} ${cleanOrg} Washington`
+    : `${cleanName} ${cleanOrg} Washington`
 
-  const searchPrompt = `Search the web for ${searchTerm}.
+  const searchPrompt = `Search the web for: ${searchTerm}
 
-Look through every search result snippet returned. Extract any phone numbers, email addresses, job titles, and full names that appear in the snippets — especially anything matching "${cleanName}".
+Read every snippet in the search results carefully. The first result will likely contain the answer.
 
-Do not reason or explain. Just copy what you find directly from the snippets into this JSON:
-{"name": null, "title": null, "email": null, "phone": null}
+Copy any of the following directly from the snippets into the JSON below:
+- Full name of the person
+- Their job title
+- Their phone number (e.g. 360-885-6527 or (360) 885-6527)
+- Their email address
 
-Rules:
-- phone: any number like (360) 555-1234 or 360-555-1234 found in results
-- email: any @email found in results
-- name: full name if found (skip if input is already a name)
-- title: job title if found
-- Use null only if it genuinely does not appear anywhere in the results`
+Return ONLY this JSON, nothing else:
+{"name": null, "title": null, "phone": null, "email": null}
+
+If a value appears in the snippets, put it in. Only use null if it is truly not in any snippet.`
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
