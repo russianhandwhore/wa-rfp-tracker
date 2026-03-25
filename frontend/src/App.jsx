@@ -87,7 +87,7 @@ export default function App() {
         if (isBlankCard(r)) return false
         // Future Projects toggle: separate view for future/upcoming RFPs
         const isFutureRow = r.status === 'upcoming' || (() => {
-          try { return JSON.parse(r.raw_data || '{}').phase_label === 'Upcoming' } catch { return false }
+          try { const d = typeof r.raw_data === 'string' ? JSON.parse(r.raw_data) : (r.raw_data || {}); return d.phase_label === 'Upcoming' } catch { return false }
         })()
         if (showFuture && !isFutureRow) return false
         if (!showFuture && isFutureRow) return false
