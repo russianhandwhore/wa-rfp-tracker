@@ -22,13 +22,11 @@ PORTALS = [
     {
         "name": "City of Seattle",
         "portal_slug": "seattle",
-        "embed_url": "https://procurement.opengov.com/portal/embed/seattle/project-list?departmentId=all&status=all",
         "portal_url": "https://procurement.opengov.com/portal/seattle",
     },
     {
         "name": "Pierce County",
         "portal_slug": "piercecountywa",
-        "embed_url": "https://procurement.opengov.com/portal/embed/piercecountywa/project-list?departmentId=all&status=all",
         "portal_url": "https://procurement.opengov.com/portal/piercecountywa",
     },
 ]
@@ -47,6 +45,11 @@ HEADERS = {
 
 OPEN_STATUSES = {"open", "active", "upcoming", "preview", "coming_soon"}
 SKIP_STATUSES = {"closed", "awarded", "cancelled", "canceled", "draft", "complete", "archived"}
+PAGE_SIZE = 10   # OpenGov embed returns 10 rows per page
+MAX_PAGES = 50   # safety cap
+
+# URL template — status=open is the correct server-side filter for active solicitations
+EMBED_BASE = "https://procurement.opengov.com/portal/embed/{slug}/project-list?departmentId=all&status=open"
 
 
 def parse_date(date_str):
@@ -68,7 +71,7 @@ def extract_rows_from_html(html):
     JS functions but we target only the rows array.
     """
     match = re.search(
-        r'"govProjects"\s*:\s*\{"count"\s*:\s*\d+\s*,\s*"rows"\s*:\s*(\[.*?\])\s*\}',
+        r'"govProjects"\s*:\s*\{"count"\s*:\s*\d+\s*,\s*"rows"\s*:\s*(\[.*\])\s*\}',
         html,
         re.DOTALL,
     )
@@ -123,6 +126,8 @@ def rows_to_rfps(rows, portal):
 
         if status_raw in ("open", "active"):
             status = "active"
+        elif status_raw in ("pending", "evaluation"):
+            status = "active"  # still accepting bids or under review — show as active
         else:
             status = "upcoming"
 
@@ -149,20 +154,37 @@ def rows_to_rfps(rows, portal):
 
 
 def scrape_portal(portal):
-    print(f"  Fetching embed URL for {portal['name']}...")
-    try:
-        resp = requests.get(portal["embed_url"], headers=HEADERS, timeout=30)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        print(f"  Request failed: {e}")
+    slug = portal["portal_slug"]
+    base_url = EMBED_BASE.format(slug=slug)  # clean URL — no fragile string replace
+    all_rows = []
+
+    for page in range(1, MAX_PAGES + 1):
+        url = f"{base_url}&page={page}"
+        print(f"  Fetching page {page} for {portal['name']}...")
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=30)
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            print(f"  Request failed on page {page}: {e}")
+            break
+
+        rows = extract_rows_from_html(resp.text)
+        if not rows:
+            break
+
+        all_rows.extend(rows)
+        print(f"  Page {page}: {len(rows)} rows (total so far: {len(all_rows)})")
+
+        # Stop when we get fewer rows than a full page
+        if len(rows) < PAGE_SIZE:
+            break
+
+        time.sleep(1)  # polite delay between pages
+
+    if not all_rows:
         return []
 
-    print(f"  HTTP {resp.status_code}, {len(resp.text):,} chars")
-    rows = extract_rows_from_html(resp.text)
-    if not rows:
-        return []
-
-    rfps = rows_to_rfps(rows, portal)
+    rfps = rows_to_rfps(all_rows, portal)
     print(f"  {len(rfps)} active/upcoming RFPs after filtering")
 
     # Deduplicate by fingerprint
