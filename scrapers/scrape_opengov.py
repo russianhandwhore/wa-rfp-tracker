@@ -67,24 +67,49 @@ def parse_date(date_str):
 def extract_rows_from_html(html):
     """
     Extract govProjects rows from window.__data embedded in the HTML.
-    The rows array itself is valid JSON; the surrounding __data blob has
-    JS functions but we target only the rows array.
+    Uses bracket-counting to find the exact end of the rows array,
+    avoiding regex issues with greedy/non-greedy on large HTML blobs.
     """
-    match = re.search(
-        r'"govProjects"\s*:\s*\{"count"\s*:\s*\d+\s*,\s*"rows"\s*:\s*(\[.*\])\s*\}',
-        html,
-        re.DOTALL,
-    )
-    if not match:
+    # Find the start of the rows array
+    marker = re.search(r'"govProjects"\s*:\s*\{"count"\s*:\s*\d+\s*,\s*"rows"\s*:\s*\[', html)
+    if not marker:
         print("    window.__data rows not found in HTML")
         return []
-    try:
-        rows = json.loads(match.group(1))
-        print(f"    Extracted {len(rows)} rows from window.__data")
-        return rows
-    except json.JSONDecodeError as e:
-        print(f"    JSON parse error on rows: {e}")
-        return []
+
+    start = marker.end() - 1  # position of the opening [
+    depth = 0
+    in_string = False
+    escape_next = False
+
+    for i in range(start, len(html)):
+        ch = html[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == '\\' and in_string:
+            escape_next = True
+            continue
+        if ch == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '[':
+            depth += 1
+        elif ch == ']':
+            depth -= 1
+            if depth == 0:
+                array_str = html[start:i + 1]
+                try:
+                    rows = json.loads(array_str)
+                    print(f"    Extracted {len(rows)} rows from window.__data")
+                    return rows
+                except json.JSONDecodeError as e:
+                    print(f"    JSON parse error on rows: {e}")
+                    return []
+
+    print("    Could not find end of rows array")
+    return []
 
 
 def rows_to_rfps(rows, portal):
