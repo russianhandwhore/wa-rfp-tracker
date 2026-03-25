@@ -6,7 +6,7 @@ const supabase = createClient(
   import.meta.env.VITE_SUPABASE_ANON_KEY
 )
 
-const PLATFORMS = ['All', 'WEBS', 'OpenGov', 'Procureware', 'Sound Transit', 'PublicPurchase', 'SAP_Ariba', 'Oracle', 'Bonfire', 'Workday', 'Biddingo', 'Standalone', 'Port of Seattle']
+const PLATFORMS = ['All', 'WEBS', 'OpenGov', 'Procureware', 'Sound Transit', 'PublicPurchase', 'SAP_Ariba', 'Oracle', 'Bonfire', 'Workday', 'Biddingo', 'Standalone']
 const CATEGORIES = ['All', 'IT', 'Construction', 'Supplies', 'Services', 'Misc']
 const SORT_OPTIONS = [
   { label: 'Newest First', value: 'created_at_desc' },
@@ -41,13 +41,14 @@ export default function App() {
   const [total, setTotal] = useState(0)
   const [nearTotal, setNearTotal] = useState(0)
   const [showEvaluating, setShowEvaluating] = useState(false)
+  const [showFuture, setShowFuture] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [docsModal, setDocsModal] = useState(null)
   const [contactModal, setContactModal] = useState(null)
   const [contactInfo, setContactInfo] = useState(null)
   const [contactLoading, setContactLoading] = useState(false)
 
-  useEffect(() => { fetchRfps() }, [search, platform, page, showEvaluating, category, sortBy])
+  useEffect(() => { fetchRfps() }, [search, platform, page, showEvaluating, showFuture, category, sortBy])
 
   useEffect(() => {
     const handler = (e) => {
@@ -72,7 +73,7 @@ export default function App() {
     let query = supabase
       .from('rfps')
       .select('*', { count: 'exact' })
-      .in('status', ['active', 'upcoming'])
+      .in('status', showFuture ? ['active', 'upcoming'] : ['active'])
       .or(`due_date.gte.${now},due_date.is.null`)
       .order(sort.col, { ascending: sort.asc, nullsFirst: sort.nullsFirst })
       .range((page - 1) * PER_PAGE, page * PER_PAGE - 1)
@@ -99,7 +100,7 @@ export default function App() {
   }
 
   function formatDate(dateStr) {
-    if (!dateStr) return 'No date'
+    if (!dateStr) return 'TBD'
     return new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
   }
 
@@ -429,6 +430,13 @@ export default function App() {
               <input type="checkbox" checked={showEvaluating} onChange={e => { setShowEvaluating(e.target.checked); setPage(1) }} className="rounded" />
               <span className="text-sm text-gray-600 whitespace-nowrap">RFPs Under Eval</span>
             </label>
+            <button
+              onClick={() => { setShowFuture(f => !f); setPage(1) }}
+              className={"px-4 py-3 rounded-lg border-2 text-sm font-semibold transition-all whitespace-nowrap " + (showFuture ? "text-white border-transparent" : "bg-white border-gray-300 text-gray-600 hover:border-gray-400")}
+              style={showFuture ? { backgroundColor: '#EE0000', borderColor: '#EE0000' } : {}}
+            >
+              🔮 Future Projects
+            </button>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide mr-1">Category:</span>
@@ -480,7 +488,7 @@ export default function App() {
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-2 flex-wrap">
                           <span className="text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: '#FFF0F0', color: '#CC0000' }}>{rfp.source_platform}</span>
-                          {rfp.agency && <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-gray-100 text-gray-600">{rfp.agency}</span>}
+                          {rfp.agency && rfp.agency !== rfp.source_platform && <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-gray-100 text-gray-600">{rfp.agency}</span>}
                           {rfp.source_platform === 'Sound Transit' && (() => {
                             const phase = (() => { try { return JSON.parse(rfp.raw_data || '{}').phase_label } catch { return null } })()
                             if (!phase) return null
