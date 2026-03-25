@@ -7,6 +7,7 @@ if no JSON is captured.
 """
 
 import asyncio
+import json
 import re
 from datetime import datetime
 import sys
@@ -158,6 +159,7 @@ def extract_rfps_from_json(data, portal):
             "source_platform": "OpenGov",
             "contact_name": contact_name,
             "contact_email": contact_email,
+            "categories": [],
             "includes_inclusion_plan": False,
         })
 
@@ -235,6 +237,66 @@ def extract_rfps_from_html(html, portal):
     return rfps
 
 
+
+def extract_rfps_from_window_data(html, portal):
+    # Extract project rows from window.__data JSON embedded in the page.
+    rfps = []
+    match = re.search(r"window\.__data\s*=\s*(\{.+\});\s*</script>", html, re.DOTALL)
+    if not match:
+        return rfps
+    try:
+        data = json.loads(match.group(1))
+    except Exception as e:
+        print(f"    window.__data parse error: {e}")
+        return rfps
+
+    rows = data.get("publicProject", {}).get("govProjects", {}).get("rows", [])
+    print(f"    window.__data: found {len(rows)} rows")
+
+    for row in rows:
+        title = clean_text(row.get("title", ""))
+        if not title:
+            continue
+        status_raw = str(row.get("status", "")).lower()
+        if status_raw not in ("open", "active", "upcoming", "preview", "coming_soon"):
+            continue
+        project_id = row.get("id")
+        gov_code = (row.get("government") or {}).get("code") or portal.get("portal_slug", "")
+        detail_url = (
+            f"https://procurement.opengov.com/portal/{gov_code}/projects/{project_id}"
+            if project_id else portal["url"]
+        )
+        dept = row.get("department") or {}
+        dept_name = dept.get("name") if isinstance(dept, dict) else None
+        template = row.get("template") or {}
+        rfp_type = template.get("title") if isinstance(template, dict) else None
+        summary_html = row.get("summary", "") or ""
+        description = None
+        if summary_html:
+            text = BeautifulSoup(summary_html, "html.parser").get_text(separator=" ").strip()
+            description = text[:400] if text else None
+        rfps.append({
+            "title": title,
+            "ref_number": row.get("financialId") or None,
+            "detail_url": detail_url,
+            "source_url": portal["url"],
+            "due_date": parse_date(row.get("proposalDeadline")),
+            "posted_date": parse_date(row.get("releaseProjectDate")),
+            "status": "active" if status_raw in ("open", "active") else "upcoming",
+            "description": description,
+            "department": dept_name,
+            "rfp_type": rfp_type,
+            "agency": portal["name"],
+            "source_name": SOURCE_NAME,
+            "source_platform": "OpenGov",
+            "contact_name": None,
+            "contact_email": None,
+            "categories": [],
+            "includes_inclusion_plan": False,
+        })
+    return rfps
+
+
 async def scrape_portal(portal):
     from playwright.async_api import async_playwright
 
@@ -298,9 +360,24 @@ async def scrape_portal(portal):
                 seen_fps.add(fp)
                 all_rfps.append(rfp)
 
-    # Fall back to HTML parsing if JSON interception yielded nothing
+    # Try window.__data extraction (most reliable for OpenGov)
     if not all_rfps:
-        print("  No usable JSON captured — trying HTML fallback...")
+        print("  Trying window.__data extraction...")
+        rfps = extract_rfps_from_window_data(html, portal)
+        for rfp in rfps:
+            fp = generate_fingerprint(
+                rfp.get("ref_number") or rfp.get("title", ""),
+                portal["name"],
+                rfp.get("due_date", "")
+            )
+            rfp["fingerprint"] = fp
+            if fp not in seen_fps:
+                seen_fps.add(fp)
+                all_rfps.append(rfp)
+
+    # Final fallback: HTML link parsing
+    if not all_rfps:
+        print("  Trying HTML link fallback...")
         rfps = extract_rfps_from_html(html, portal)
         for rfp in rfps:
             fp = generate_fingerprint(
@@ -322,6 +399,7 @@ def run():
     all_rfps = []
     total_saved = 0
     error_msg = None
+    status = "failed"
 
     try:
         for portal in PORTALS:

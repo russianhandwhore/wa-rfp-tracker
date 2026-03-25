@@ -28,11 +28,11 @@ jobs:
       #     SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
       #   run: python scrapers/scrape_webs.py
 
-      # - name: Run OpenGov scraper (Seattle + Pierce County)
-      #   env:
-      #     SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      #     SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-      #   run: python scrapers/scrape_opengov.py
+      - name: Run OpenGov scraper (Seattle + Pierce County)
+         env:
+           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+         run: python scrapers/scrape_opengov.py
 
       #- name: Run Procureware scraper (Spokane + Snohomish + Community Transit)
       #  env:
@@ -52,8 +52,8 @@ jobs:
       #    SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
       #  run: python scrapers/scrape_soundtransit.py
 
-      - name: Run King County scraper
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python scrapers/scrape_kingcounty.py
+      #- name: Run King County scraper
+      #  env:
+      #    SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      #    SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      #  run: python scrapers/scrape_kingcounty.py
