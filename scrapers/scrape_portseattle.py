@@ -38,6 +38,13 @@ SELECT = "Id,ProcurementNumber,ProcurementTitle,BidDueDateTime"
 
 PAGE_SIZE = 50
 
+# Detail endpoint — fetches description, contact, department per solicitation
+DETAIL_SELECT = (
+    "BidDueDateTime,ProcurementNumber,ProcurementTitle,Description,"
+    "PortContact,PortContactPhone,PortContactEmail,AdvertisementDate,DisplayFutureList"
+)
+DETAIL_EXPAND = "SolicitationStatus($select=Name),Department($select=Name)"
+
 
 def build_url(future=False, skip=0):
     status_filter = (
@@ -69,6 +76,24 @@ def parse_date(date_str):
         return None
 
 
+def fetch_detail(sol_id):
+    """Fetch full detail for one solicitation: description, contact, department."""
+    url = (
+        f"{API_BASE}?$filter= Id eq {sol_id}"
+        f"&$expand={DETAIL_EXPAND}"
+        f"&$select={DETAIL_SELECT}"
+    )
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        items = data.get("value", [])
+        return items[0] if items else {}
+    except Exception as e:
+        print(f"    Detail fetch failed for {sol_id}: {e}")
+        return {}
+
+
 def fetch_all(future=False):
     label = "future" if future else "active"
     all_items = []
@@ -97,12 +122,13 @@ def fetch_all(future=False):
     return all_items
 
 
-def item_to_rfp(item, is_future=False):
+def item_to_rfp(item, detail=None, is_future=False):
     sol_id = item.get("Id", "")
     title  = clean_text(item.get("ProcurementTitle", ""))
     if not title:
         return None
 
+    detail      = detail or {}
     ref_number  = item.get("ProcurementNumber") or None
     detail_url  = f"{DETAIL_BASE}/{sol_id}" if sol_id else PORTAL_URL
     due_date    = parse_date(item.get("BidDueDateTime"))
@@ -119,22 +145,37 @@ def item_to_rfp(item, is_future=False):
     else:
         status = "active"
 
+    # Description — from detail endpoint, truncate to 800 chars
+    raw_desc    = clean_text(detail.get("Description", "") or "")
+    description = raw_desc[:800] if raw_desc else None
+
+    # Contact — from detail endpoint
+    contact_name  = clean_text(detail.get("PortContact", "") or "") or None
+    contact_email = clean_text(detail.get("PortContactEmail", "") or "") or None
+
+    # Department
+    dept_obj   = detail.get("Department") or {}
+    department = clean_text(dept_obj.get("Name", "") or "") or None
+
+    # Posted date
+    posted_date = parse_date(detail.get("AdvertisementDate"))
+
     return {
         "title":                 title,
         "ref_number":            str(ref_number)[:100] if ref_number else None,
         "detail_url":            detail_url,
         "source_url":            PORTAL_URL,
         "due_date":              due_date,
-        "posted_date":           None,
+        "posted_date":           posted_date,
         "status":                status,
-        "description":           None,
-        "department":            None,
+        "description":           description,
+        "department":            str(department)[:200] if department else None,
         "rfp_type":              str(rfp_type)[:100] if rfp_type else None,
         "agency":                "Port of Seattle",
         "source_name":           SOURCE_NAME,
         "source_platform":       PLATFORM,
-        "contact_name":          None,
-        "contact_email":         None,
+        "contact_name":          contact_name,
+        "contact_email":         contact_email,
         "categories":            [],
         "includes_inclusion_plan": False,
     }
@@ -153,7 +194,9 @@ def run():
         print("\n--- Active solicitations ---")
         active_items = fetch_all(future=False)
         for item in active_items:
-            rfp = item_to_rfp(item, is_future=False)
+            sol_id = item.get("Id", "")
+            detail = fetch_detail(sol_id) if sol_id else {}
+            rfp = item_to_rfp(item, detail=detail, is_future=False)
             if rfp:
                 fp = generate_fingerprint(
                     rfp["ref_number"] or rfp["title"],
@@ -167,7 +210,9 @@ def run():
         print("\n--- Future solicitations ---")
         future_items = fetch_all(future=True)
         for item in future_items:
-            rfp = item_to_rfp(item, is_future=True)
+            sol_id = item.get("Id", "")
+            detail = fetch_detail(sol_id) if sol_id else {}
+            rfp = item_to_rfp(item, detail=detail, is_future=True)
             if rfp:
                 fp = generate_fingerprint(
                     rfp["ref_number"] or rfp["title"],
