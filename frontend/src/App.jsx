@@ -6,7 +6,7 @@ const supabase = createClient(
   import.meta.env.VITE_SUPABASE_ANON_KEY
 )
 
-const PLATFORMS = ['All', 'WEBS', 'OpenGov', 'Procureware', 'Sound Transit', 'PublicPurchase', 'SAP_Ariba', 'Oracle', 'Bonfire', 'Workday', 'Biddingo', 'Standalone', 'King County']
+const PLATFORMS = ['All', 'WEBS', 'OpenGov', 'Procureware', 'Sound Transit', 'PublicPurchase', 'SAP_Ariba', 'Oracle', 'Bonfire', 'Workday', 'Biddingo', 'Standalone']
 const CATEGORIES = ['All', 'IT', 'Construction', 'Supplies', 'Services', 'Misc']
 const SORT_OPTIONS = [
   { label: 'Newest First', value: 'created_at_desc' },
@@ -473,6 +473,7 @@ export default function App() {
                 const daysLeft = getDaysLeft(rfp.due_date)
                 const docs = getDocuments(rfp)
                 const hasDocuments = rfp.source_platform === 'Procureware'
+                const isOpenGov = rfp.source_platform === 'OpenGov'
                 return (
                   <div key={rfp.id} className="bg-white rounded-xl border border-gray-200 p-5 hover:shadow-md hover:border-red-300 transition-all group">
                     <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
@@ -527,6 +528,11 @@ export default function App() {
                           {rfp.detail_url && (
                             <a href={rfp.detail_url} target="_blank" rel="noopener noreferrer" style={{ backgroundColor: '#EE0000' }} className="text-white text-xs font-semibold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity whitespace-nowrap text-center">
                               View RFP →
+                            </a>
+                          )}
+                          {isOpenGov && rfp.detail_url && (
+                            <a href={rfp.detail_url + '/downloads'} target="_blank" rel="noopener noreferrer" className="text-xs font-semibold px-4 py-2 rounded-lg border-2 border-gray-300 hover:border-red-400 hover:text-red-600 transition-all whitespace-nowrap bg-white text-center">
+                              📄 Documents
                             </a>
                           )}
                           {hasDocuments && (() => {
