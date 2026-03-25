@@ -29,10 +29,10 @@ jobs:
       #   run: python scrapers/scrape_webs.py
 
       - name: Run OpenGov scraper (Seattle + Pierce County)
-         env:
+        env:
            SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
            SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-         run: python scrapers/scrape_opengov.py
+        run: python scrapers/scrape_opengov.py
 
       #- name: Run Procureware scraper (Spokane + Snohomish + Community Transit)
       #  env:
