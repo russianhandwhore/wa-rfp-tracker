@@ -6,7 +6,7 @@ const supabase = createClient(
   import.meta.env.VITE_SUPABASE_ANON_KEY
 )
 
-const PLATFORMS = ['All', 'WEBS', 'OpenGov', 'Procureware', 'Sound Transit', 'PublicPurchase', 'SAP_Ariba', 'Oracle', 'Bonfire', 'Workday', 'Biddingo', 'Standalone']
+const PLATFORMS = ['All', 'WEBS', 'OpenGov', 'Procureware', 'Sound Transit', 'PublicPurchase', 'SAP_Ariba', 'Oracle', 'Bonfire', 'Workday', 'Biddingo', 'Standalone', 'King County']
 const CATEGORIES = ['All', 'IT', 'Construction', 'Supplies', 'Services', 'Misc']
 const SORT_OPTIONS = [
   { label: 'Newest First', value: 'created_at_desc' },

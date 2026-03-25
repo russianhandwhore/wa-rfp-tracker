@@ -46,8 +46,14 @@ jobs:
       #    SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
       #  run: python scrapers/scrape_omwbe.py
 
-      - name: Run Sound Transit scraper
+      #- name: Run Sound Transit scraper
+      #  env:
+      #    SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      #    SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      #  run: python scrapers/scrape_soundtransit.py
+
+        - name: Run King County scraper
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python scrapers/scrape_soundtransit.py
+        run: python scrapers/scrape_kingcounty.py
