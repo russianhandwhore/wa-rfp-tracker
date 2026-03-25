@@ -59,4 +59,7 @@ jobs:
       #  run: python scrapers/scrape_kingcounty.py
       
       - name: Port of Seattle
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python scrapers/scrape_portseattle.py
