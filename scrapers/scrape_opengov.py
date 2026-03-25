@@ -1,14 +1,16 @@
 """
 OpenGov Procurement Portal Scraper
 Covers: City of Seattle, Pierce County
-Strategy: Uses Playwright route interception (set up BEFORE navigation)
-to capture all JSON API responses. Falls back to parsing rendered HTML
-if no JSON is captured.
+
+Strategy: fetch the /portal/embed/ URL with plain requests — no Playwright needed.
+The embed endpoint returns server-side rendered HTML with window.__data fully
+populated, bypassing Cloudflare bot protection entirely.
 """
 
-import asyncio
-import json
 import re
+import json
+import time
+import requests
 from datetime import datetime
 import sys
 import os
@@ -20,20 +22,34 @@ PORTALS = [
     {
         "name": "City of Seattle",
         "portal_slug": "seattle",
-        "url": "https://procurement.opengov.com/portal/seattle",
+        "embed_url": "https://procurement.opengov.com/portal/embed/seattle/project-list?departmentId=all&status=all",
+        "portal_url": "https://procurement.opengov.com/portal/seattle",
     },
     {
         "name": "Pierce County",
         "portal_slug": "piercecountywa",
-        "url": "https://procurement.opengov.com/portal/piercecountywa",
+        "embed_url": "https://procurement.opengov.com/portal/embed/piercecountywa/project-list?departmentId=all&status=all",
+        "portal_url": "https://procurement.opengov.com/portal/piercecountywa",
     },
 ]
 
 SOURCE_NAME = "OpenGov Procurement Portal"
 
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+}
+
+OPEN_STATUSES = {"open", "active", "upcoming", "preview", "coming_soon"}
+SKIP_STATUSES = {"closed", "awarded", "cancelled", "canceled", "draft", "complete", "archived"}
+
 
 def parse_date(date_str):
-    """Parse ISO or common date strings."""
     if not date_str:
         return None
     try:
@@ -45,247 +61,82 @@ def parse_date(date_str):
             return None
 
 
-def extract_rfps_from_json(data, portal):
-    """Parse RFPs from any JSON payload that looks like a list of solicitations."""
-    rfps = []
-
-    # Unwrap common envelope structures
-    items = []
-    if isinstance(data, list):
-        items = data
-    elif isinstance(data, dict):
-        for key in ("projects", "solicitations", "data", "results", "items", "records", "value"):
-            if key in data and isinstance(data[key], list):
-                items = data[key]
-                break
-
-    if not items:
-        return rfps
-
-    print(f"    Parsing {len(items)} items from JSON payload")
-
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-
-        # Skip closed/awarded solicitations
-        status = str(item.get("status", "") or item.get("state", "")).lower()
-        if status in ("closed", "awarded", "cancelled", "draft", "complete"):
-            continue
-
-        title = clean_text(item.get("title") or item.get("name") or "")
-        if not title or len(title) < 5:
-            continue
-
-        # Build detail URL from project ID
-        project_id = (
-            item.get("id") or item.get("projectId") or
-            item.get("project_id") or item.get("uuid")
-        )
-        detail_url = None
-        if project_id:
-            detail_url = (
-                f"https://procurement.opengov.com/portal/"
-                f"{portal['portal_slug']}/projects/{project_id}"
-            )
-
-        # Due date — try multiple field names
-        due_date = parse_date(
-            item.get("dueDate") or item.get("due_date") or
-            item.get("closingDate") or item.get("closing_date") or
-            item.get("submissionDeadline") or item.get("closeDate")
-        )
-
-        posted_date = parse_date(
-            item.get("postedDate") or item.get("posted_date") or
-            item.get("releaseDate") or item.get("release_date") or
-            item.get("createdAt") or item.get("created_at")
-        )
-
-        # Department / sub-agency
-        department = (
-            item.get("department") or item.get("departmentName") or
-            item.get("department_name") or item.get("organization")
-        )
-        if isinstance(department, dict):
-            department = department.get("name") or department.get("title")
-
-        # Reference / project number
-        ref_number = (
-            item.get("projectNumber") or item.get("project_number") or
-            item.get("referenceNumber") or item.get("bidNumber") or
-            item.get("solicitationNumber")
-        )
-        if not ref_number and project_id:
-            ref_number = str(project_id)
-
-        # Contact info
-        contact_name, contact_email = None, None
-        contact = item.get("contact") or item.get("procurementContact")
-        if isinstance(contact, dict):
-            contact_name = contact.get("name") or contact.get("fullName")
-            contact_email = contact.get("email")
-        elif isinstance(contact, str):
-            contact_name = contact
-
-        # Description / scope of work
-        description = clean_text(
-            item.get("description") or item.get("summary") or item.get("scope") or ""
-        )
-        if description and len(description) > 600:
-            sentences = description.split(". ")
-            description = ". ".join(sentences[:4])
-            if not description.endswith("."):
-                description += "."
-
-        rfp_type = (
-            item.get("solicitationType") or item.get("type") or
-            item.get("projectType") or item.get("category")
-        )
-
-        rfps.append({
-            "title": title,
-            "description": description or None,
-            "agency": portal["name"],
-            "department": str(department)[:200] if department else None,
-            "source_url": portal["url"],
-            "detail_url": detail_url,
-            "ref_number": str(ref_number)[:100] if ref_number else None,
-            "status": "active",
-            "rfp_type": str(rfp_type)[:100] if rfp_type else None,
-            "due_date": due_date,
-            "posted_date": posted_date,
-            "source_name": SOURCE_NAME,
-            "source_platform": "OpenGov",
-            "contact_name": contact_name,
-            "contact_email": contact_email,
-            "categories": [],
-            "includes_inclusion_plan": False,
-        })
-
-    return rfps
-
-
-def extract_rfps_from_html(html, portal):
+def extract_rows_from_html(html):
     """
-    HTML fallback: parse rendered DOM after JS has run.
-    OpenGov renders project cards with links like /portal/seattle/projects/12345
+    Extract govProjects rows from window.__data embedded in the HTML.
+    The rows array itself is valid JSON; the surrounding __data blob has
+    JS functions but we target only the rows array.
     """
-    rfps = []
-    soup = BeautifulSoup(html, "lxml")
-
-    # Find all links pointing to project detail pages
-    project_links = soup.find_all(
-        "a",
-        href=re.compile(r"/portal/[^/]+/projects/\d+", re.I)
+    match = re.search(
+        r'"govProjects"\s*:\s*\{"count"\s*:\s*\d+\s*,\s*"rows"\s*:\s*(\[.*?\])\s*\}',
+        html,
+        re.DOTALL,
     )
-    print(f"    HTML fallback: found {len(project_links)} project links")
-
-    seen_hrefs = set()
-    for link in project_links:
-        href = link["href"]
-        if href in seen_hrefs:
-            continue
-        seen_hrefs.add(href)
-
-        title = clean_text(link.get_text())
-        if not title or len(title) < 5:
-            # Title might be in a sibling/parent element
-            parent = link.find_parent(["div", "li", "article"])
-            if parent:
-                heading = parent.find(["h1", "h2", "h3", "h4"])
-                if heading:
-                    title = clean_text(heading.get_text())
-
-        if not title or len(title) < 5:
-            continue
-
-        detail_url = (
-            href if href.startswith("http")
-            else "https://procurement.opengov.com" + href
-        )
-
-        # Look for a due date in the surrounding card
-        card = link.find_parent(["div", "li", "article", "tr"]) or link
-        card_text = card.get_text(" ", strip=True)
-        due_date = None
-        date_match = re.search(
-            r"\b(\d{1,2}/\d{1,2}/\d{2,4}|\d{4}-\d{2}-\d{2})\b", card_text
-        )
-        if date_match:
-            due_date = parse_date(date_match.group(1))
-
-        rfps.append({
-            "title": title,
-            "description": None,
-            "agency": portal["name"],
-            "department": None,
-            "source_url": portal["url"],
-            "detail_url": detail_url,
-            "ref_number": None,
-            "status": "active",
-            "rfp_type": None,
-            "due_date": due_date,
-            "posted_date": None,
-            "source_name": SOURCE_NAME,
-            "source_platform": "OpenGov",
-            "contact_name": None,
-            "contact_email": None,
-            "includes_inclusion_plan": False,
-        })
-
-    return rfps
-
-
-
-def extract_rfps_from_window_data(html, portal):
-    # Extract project rows from window.__data JSON embedded in the page.
-    rfps = []
-    match = re.search(r"window\.__data\s*=\s*(\{.+\});\s*</script>", html, re.DOTALL)
     if not match:
-        return rfps
+        print("    window.__data rows not found in HTML")
+        return []
     try:
-        data = json.loads(match.group(1))
-    except Exception as e:
-        print(f"    window.__data parse error: {e}")
-        return rfps
+        rows = json.loads(match.group(1))
+        print(f"    Extracted {len(rows)} rows from window.__data")
+        return rows
+    except json.JSONDecodeError as e:
+        print(f"    JSON parse error on rows: {e}")
+        return []
 
-    rows = data.get("publicProject", {}).get("govProjects", {}).get("rows", [])
-    print(f"    window.__data: found {len(rows)} rows")
 
+def rows_to_rfps(rows, portal):
+    rfps = []
     for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        status_raw = str(row.get("status", "")).lower()
+        is_coming_soon = row.get("comingSoon", False)
+
+        if status_raw in SKIP_STATUSES:
+            continue
+        if status_raw not in OPEN_STATUSES and not is_coming_soon:
+            continue
+
         title = clean_text(row.get("title", ""))
         if not title:
             continue
-        status_raw = str(row.get("status", "")).lower()
-        if status_raw not in ("open", "active", "upcoming", "preview", "coming_soon"):
-            continue
+
         project_id = row.get("id")
-        gov_code = (row.get("government") or {}).get("code") or portal.get("portal_slug", "")
+        gov_code = (row.get("government") or {}).get("code") or portal["portal_slug"]
         detail_url = (
             f"https://procurement.opengov.com/portal/{gov_code}/projects/{project_id}"
-            if project_id else portal["url"]
+            if project_id else portal["portal_url"]
         )
+
         dept = row.get("department") or {}
         dept_name = dept.get("name") if isinstance(dept, dict) else None
+
         template = row.get("template") or {}
         rfp_type = template.get("title") if isinstance(template, dict) else None
-        summary_html = row.get("summary", "") or ""
+
+        summary_html = row.get("summary") or ""
         description = None
         if summary_html:
             text = BeautifulSoup(summary_html, "html.parser").get_text(separator=" ").strip()
-            description = text[:400] if text else None
+            description = text[:500] if text else None
+
+        if status_raw in ("open", "active"):
+            status = "active"
+        else:
+            status = "upcoming"
+
         rfps.append({
             "title": title,
-            "ref_number": row.get("financialId") or None,
+            "ref_number": str(row["financialId"])[:100] if row.get("financialId") else None,
             "detail_url": detail_url,
-            "source_url": portal["url"],
+            "source_url": portal["portal_url"],
             "due_date": parse_date(row.get("proposalDeadline")),
             "posted_date": parse_date(row.get("releaseProjectDate")),
-            "status": "active" if status_raw in ("open", "active") else "upcoming",
+            "status": status,
             "description": description,
-            "department": dept_name,
-            "rfp_type": rfp_type,
+            "department": str(dept_name)[:200] if dept_name else None,
+            "rfp_type": str(rfp_type)[:100] if rfp_type else None,
             "agency": portal["name"],
             "source_name": SOURCE_NAME,
             "source_platform": "OpenGov",
@@ -297,100 +148,38 @@ def extract_rfps_from_window_data(html, portal):
     return rfps
 
 
-async def scrape_portal(portal):
-    from playwright.async_api import async_playwright
+def scrape_portal(portal):
+    print(f"  Fetching embed URL for {portal['name']}...")
+    try:
+        resp = requests.get(portal["embed_url"], headers=HEADERS, timeout=30)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        print(f"  Request failed: {e}")
+        return []
 
-    all_rfps = []
-    captured_json = []
+    print(f"  HTTP {resp.status_code}, {len(resp.text):,} chars")
+    rows = extract_rows_from_html(resp.text)
+    if not rows:
+        return []
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
+    rfps = rows_to_rfps(rows, portal)
+    print(f"  {len(rfps)} active/upcoming RFPs after filtering")
+
+    # Deduplicate by fingerprint
+    seen = set()
+    unique = []
+    for rfp in rfps:
+        fp = generate_fingerprint(
+            rfp.get("ref_number") or rfp.get("title", ""),
+            portal["name"],
+            rfp.get("due_date", "") or "",
         )
-        page = await context.new_page()
+        rfp["fingerprint"] = fp
+        if fp not in seen:
+            seen.add(fp)
+            unique.append(rfp)
 
-        # --- Set up interception BEFORE navigating ---
-        # This ensures we don't miss any API calls that fire during initial load.
-        async def intercept_response(response):
-            try:
-                content_type = response.headers.get("content-type", "")
-                if "json" in content_type and response.status == 200:
-                    url = response.url
-                    print(f"    [JSON {response.status}] {url[:120]}")
-                    body = await response.json()
-                    captured_json.append({"url": url, "data": body})
-            except Exception:
-                pass  # Ignore responses that fail to parse
-
-        page.on("response", intercept_response)
-
-        print(f"  Loading {portal['name']}...")
-        try:
-            # networkidle waits until all network activity has settled
-            await page.goto(portal["url"], timeout=60000, wait_until="networkidle")
-        except Exception as e:
-            print(f"  Warning during navigation: {e}")
-
-        # Extra buffer for any lazy-loaded API calls
-        await asyncio.sleep(5)
-
-        html = await page.content()
-        await browser.close()
-
-    print(f"  Captured {len(captured_json)} JSON responses for {portal['name']}")
-
-    # Attempt to extract RFPs from captured JSON payloads
-    seen_fps = set()
-
-    for resp in captured_json:
-        rfps = extract_rfps_from_json(resp["data"], portal)
-        for rfp in rfps:
-            fp = generate_fingerprint(
-                rfp.get("title", ""),
-                rfp.get("agency", ""),
-                rfp.get("due_date", "")
-            )
-            rfp["fingerprint"] = fp
-            if fp not in seen_fps:
-                seen_fps.add(fp)
-                all_rfps.append(rfp)
-
-    # Try window.__data extraction (most reliable for OpenGov)
-    if not all_rfps:
-        print("  Trying window.__data extraction...")
-        rfps = extract_rfps_from_window_data(html, portal)
-        for rfp in rfps:
-            fp = generate_fingerprint(
-                rfp.get("ref_number") or rfp.get("title", ""),
-                portal["name"],
-                rfp.get("due_date", "")
-            )
-            rfp["fingerprint"] = fp
-            if fp not in seen_fps:
-                seen_fps.add(fp)
-                all_rfps.append(rfp)
-
-    # Final fallback: HTML link parsing
-    if not all_rfps:
-        print("  Trying HTML link fallback...")
-        rfps = extract_rfps_from_html(html, portal)
-        for rfp in rfps:
-            fp = generate_fingerprint(
-                rfp.get("title", ""),
-                rfp.get("agency", ""),
-                rfp.get("due_date", "")
-            )
-            rfp["fingerprint"] = fp
-            if fp not in seen_fps:
-                seen_fps.add(fp)
-                all_rfps.append(rfp)
-
-    return all_rfps
+    return unique
 
 
 def run():
@@ -402,15 +191,16 @@ def run():
     status = "failed"
 
     try:
-        for portal in PORTALS:
+        for i, portal in enumerate(PORTALS):
             print(f"\n--- Scraping {portal['name']} ---")
-            rfps = asyncio.run(scrape_portal(portal))
-            print(f"  Found {len(rfps)} active RFPs for {portal['name']}")
+            rfps = scrape_portal(portal)
+            print(f"  Found {len(rfps)} unique RFPs for {portal['name']}")
             if rfps:
-                s = rfps[0]
-                print(f"  Sample title: {s.get('title', '')[:60]}")
-                print(f"  Sample due:   {s.get('due_date')}")
+                print(f"  Sample: {rfps[0].get('title', '')[:60]}")
+                print(f"  Due:    {rfps[0].get('due_date')}")
             all_rfps.extend(rfps)
+            if i < len(PORTALS) - 1:
+                time.sleep(2)
 
         print(f"\nTotal OpenGov RFPs: {len(all_rfps)}")
 
