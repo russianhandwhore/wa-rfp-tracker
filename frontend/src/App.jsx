@@ -85,7 +85,8 @@ export default function App() {
     if (!error) {
       const filtered = (data || []).filter(r => {
         if (isBlankCard(r)) return false
-        if (!showFuture && r.status === 'upcoming' && r.source_platform === 'Port of Seattle') return false
+        // Hide all upcoming rows unless Future Projects is active
+        if (!showFuture && r.status === 'upcoming') return false
         if (!showEvaluating) {
           try {
             const raw = JSON.parse(r.raw_data || '{}')
