@@ -6,7 +6,7 @@ const supabase = createClient(
   import.meta.env.VITE_SUPABASE_ANON_KEY
 )
 
-const PLATFORMS = ['All', 'WEBS', 'OpenGov', 'Procureware', 'Sound Transit', 'PublicPurchase', 'SAP_Ariba', 'Oracle', 'Bonfire', 'Workday', 'Biddingo', 'Standalone']
+const PLATFORMS = ['All', 'WEBS', 'OpenGov', 'Port of Seattle', 'Procureware', 'Sound Transit', 'PublicPurchase', 'SAP_Ariba', 'Oracle', 'Bonfire', 'Workday', 'Biddingo', 'Standalone']
 const CATEGORIES = ['All', 'IT', 'Construction', 'Supplies', 'Services', 'Misc']
 const SORT_OPTIONS = [
   { label: 'Newest First', value: 'created_at_desc' },
@@ -73,7 +73,7 @@ export default function App() {
     let query = supabase
       .from('rfps')
       .select('*', { count: 'exact' })
-      .in('status', showFuture ? ['active', 'upcoming'] : ['active'])
+      .in('status', ['active', 'upcoming'])
       .or(`due_date.gte.${now},due_date.is.null`)
       .order(sort.col, { ascending: sort.asc, nullsFirst: sort.nullsFirst })
       .range((page - 1) * PER_PAGE, page * PER_PAGE - 1)
@@ -85,6 +85,7 @@ export default function App() {
     if (!error) {
       const filtered = (data || []).filter(r => {
         if (isBlankCard(r)) return false
+        if (!showFuture && r.status === 'upcoming' && r.source_platform === 'Port of Seattle') return false
         if (!showEvaluating) {
           try {
             const raw = JSON.parse(r.raw_data || '{}')
