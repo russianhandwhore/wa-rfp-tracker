@@ -73,7 +73,7 @@ export default function App() {
     let query = supabase
       .from('rfps')
       .select('*', { count: 'exact' })
-      .in('status', ['active', 'upcoming'])
+      .in('status', showFuture ? ['upcoming'] : ['active'])
       .or(`due_date.gte.${now},due_date.is.null`)
       .order(sort.col, { ascending: sort.asc, nullsFirst: sort.nullsFirst })
       .range((page - 1) * PER_PAGE, page * PER_PAGE - 1)
@@ -85,12 +85,7 @@ export default function App() {
     if (!error) {
       const filtered = (data || []).filter(r => {
         if (isBlankCard(r)) return false
-        // Future Projects toggle: separate view for future/upcoming RFPs
-        const isFutureRow = r.status === 'upcoming' || (() => {
-          try { const d = typeof r.raw_data === 'string' ? JSON.parse(r.raw_data) : (r.raw_data || {}); return d.phase_label === 'Upcoming' } catch { return false }
-        })()
-        if (showFuture && !isFutureRow) return false
-        if (!showFuture && isFutureRow) return false
+
         if (!showEvaluating) {
           try {
             const raw = JSON.parse(r.raw_data || '{}')
