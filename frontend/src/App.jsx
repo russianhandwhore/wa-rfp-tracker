@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import SoundTransitPage from './SoundTransitPage'
 import { createClient } from '@supabase/supabase-js'
 
 const supabase = createClient(
@@ -42,6 +43,7 @@ export default function App() {
   const [nearTotal, setNearTotal] = useState(0)
   const [showEvaluating, setShowEvaluating] = useState(false)
   const [showFuture, setShowFuture] = useState(false)
+  const [activePage, setActivePage] = useState('main')
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [docsModal, setDocsModal] = useState(null)
   const [contactModal, setContactModal] = useState(null)
@@ -196,6 +198,10 @@ export default function App() {
 
   const totalPages = Math.ceil(total / PER_PAGE)
 
+  if (activePage === 'soundtransit') {
+    return <SoundTransitPage onBack={() => setActivePage('main')} />
+  }
+
   return (
     <div className="min-h-screen bg-gray-50">
 
@@ -340,6 +346,7 @@ export default function App() {
             <div className="hidden md:flex items-center gap-8">
               <a href="#" className="text-gray-300 hover:text-white text-sm transition-colors">Home</a>
               <a href="#search-section" className="text-gray-300 hover:text-white text-sm transition-colors">Browse RFPs</a>
+              <button onClick={() => setActivePage('soundtransit')} className="text-gray-300 hover:text-white text-sm transition-colors">Sound Transit</button>
               <a href="#" className="text-gray-300 hover:text-white text-sm transition-colors">About</a>
               <a href="#" className="text-gray-300 hover:text-white text-sm transition-colors">Sources</a>
               <a href="#" className="text-gray-300 hover:text-white text-sm transition-colors">Contact</a>
