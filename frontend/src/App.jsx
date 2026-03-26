@@ -490,6 +490,9 @@ export default function App() {
                         <div className="flex items-center gap-2 mb-2 flex-wrap">
                           <span className="text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: '#FFF0F0', color: '#CC0000' }}>{rfp.source_platform}</span>
                           {rfp.agency && rfp.agency !== rfp.source_platform && <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-gray-100 text-gray-600">{rfp.agency}</span>}
+                          {rfp.status === 'upcoming' && rfp.source_platform === 'Port of Seattle' && (
+                            <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200">🔮 Upcoming</span>
+                          )}
                           {rfp.source_platform === 'Sound Transit' && (() => {
                             const phase = (() => { try { return JSON.parse(rfp.raw_data || '{}').phase_label } catch { return null } })()
                             if (!phase) return null
