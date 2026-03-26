@@ -452,7 +452,7 @@ export default function App() {
             <select value={sortBy} onChange={e => { setSortBy(e.target.value); setPage(1) }} className="px-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:border-red-500 text-gray-900 bg-white">
               {SORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
-            <select value={agency} onChange={e => { setAgency(e.target.value); setPage(1) }} className="px-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:border-red-500 text-gray-900 bg-white">
+            <select value={agency} onChange={e => { setAgency(e.target.value); setPage(1) }} className="px-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:border-red-500 text-gray-900 bg-white" style={{ maxWidth: '180px' }}>
               {agencies.length > 0
                 ? agencies.map(a => <option key={a} value={a}>{a === 'All' ? 'All Agencies' : a}</option>)
                 : <option value="All">All Agencies</option>
