@@ -141,7 +141,6 @@ function SnapshotModal({ onClose }) {
                     <div className="flex items-start justify-between gap-4">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-                          <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">📋 Snapshot</span>
                           {phase && <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${phaseColor(phase)}`}>{phase === 'Advertising' ? '📢' : phase === 'Upcoming' ? '🔮' : '⏳'} {phase}</span>}
                           {rfp.rfp_type && <span className="text-xs text-gray-500 px-2 py-0.5 rounded-full bg-gray-100">{rfp.rfp_type}</span>}
                         </div>
@@ -195,8 +194,16 @@ export default function SoundTransitPage({ onBack }) {
   const [iframeError, setIframeError] = useState(false)
   const [iframeLoaded, setIframeLoaded] = useState(false)
 
+  // Detect iframe block via timeout — onError doesn't fire for X-Frame-Options blocks
+  useEffect(() => {
+    if (iframeError) return
+    const timer = setTimeout(() => {
+      if (!iframeLoaded) setIframeError(true)
+    }, 5000)
+    return () => clearTimeout(timer)
+  }, [iframeLoaded, iframeError])
+
   const handleIframeLoad = () => setIframeLoaded(true)
-  const handleIframeError = () => setIframeError(true)
   const closeModal = useCallback(() => setShowModal(false), [])
 
   return (
@@ -310,7 +317,6 @@ export default function SoundTransitPage({ onBack }) {
                 title="Sound Transit Vendor Portal"
                 className="w-full h-full border-0"
                 onLoad={handleIframeLoad}
-                onError={handleIframeError}
                 sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
                 referrerPolicy="no-referrer-when-downgrade"
               />
