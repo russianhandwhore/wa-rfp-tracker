@@ -6,7 +6,7 @@ const supabase = createClient(
   import.meta.env.VITE_SUPABASE_ANON_KEY
 )
 
-const PORTAL_URL = 'https://vendorportal.soundtransit.org'
+const PORTAL_URL = 'https://www.biddingo.com/soundtransit'
 const SNAPSHOT_URL = 'https://www.soundtransit.org/sites/default/files/documents/snapshot-current.pdf'
 
 function SnapshotModal({ onClose }) {
@@ -199,7 +199,7 @@ export default function SoundTransitPage({ onBack }) {
     if (iframeError) return
     const timer = setTimeout(() => {
       if (!iframeLoaded) setIframeError(true)
-    }, 5000)
+    }, 12000)
     return () => clearTimeout(timer)
   }, [iframeLoaded, iframeError])
 
