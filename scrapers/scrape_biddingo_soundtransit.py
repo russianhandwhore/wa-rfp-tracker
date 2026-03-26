@@ -25,7 +25,10 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/120.0.0.0 Safari/537.36"
     ),
-    "Accept": "application/json",
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://biddingo.com/",
+    "Origin": "https://biddingo.com",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
 OPEN_STATUSES = {"open for bidding", "open"}
@@ -91,6 +94,8 @@ def run():
     try:
         print(f"Fetching {API_URL}...")
         resp = requests.get(API_URL, headers=HEADERS, timeout=30)
+        print(f"  HTTP {resp.status_code}, Content-Type: {resp.headers.get('Content-Type', 'unknown')}")
+        print(f"  Response preview: {resp.text[:300]}")
         resp.raise_for_status()
         data = resp.json()
 
