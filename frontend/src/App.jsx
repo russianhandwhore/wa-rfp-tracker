@@ -43,6 +43,8 @@ export default function App() {
   const [nearTotal, setNearTotal] = useState(0)
   const [showEvaluating, setShowEvaluating] = useState(false)
   const [showFuture, setShowFuture] = useState(false)
+  const [agency, setAgency] = useState('All')
+  const [agencies, setAgencies] = useState([])
   const [activePage, setActivePage] = useState('main')
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [docsModal, setDocsModal] = useState(null)
@@ -50,7 +52,22 @@ export default function App() {
   const [contactInfo, setContactInfo] = useState(null)
   const [contactLoading, setContactLoading] = useState(false)
 
-  useEffect(() => { fetchRfps() }, [search, platform, page, showEvaluating, showFuture, category, sortBy])
+  useEffect(() => { fetchRfps() }, [search, platform, page, showEvaluating, showFuture, category, sortBy, agency])
+
+  useEffect(() => {
+    async function fetchAgencies() {
+      const { data } = await supabase
+        .from('rfps')
+        .select('agency')
+        .not('agency', 'is', null)
+        .neq('agency', '')
+      if (data) {
+        const unique = ['All', ...Array.from(new Set(data.map(r => r.agency).filter(Boolean))).sort()]
+        setAgencies(unique)
+      }
+    }
+    fetchAgencies()
+  }, [])
 
   useEffect(() => {
     const handler = (e) => {
@@ -82,6 +99,7 @@ export default function App() {
 
     if (search) query = query.ilike('title', '%' + search + '%')
     if (platform !== 'All') query = query.eq('source_platform', platform)
+    if (agency !== 'All') query = query.eq('agency', agency)
     if (category !== 'All') query = query.contains('categories', [category])
     const { data, count, error } = await query
     if (!error) {
@@ -434,10 +452,12 @@ export default function App() {
             <select value={sortBy} onChange={e => { setSortBy(e.target.value); setPage(1) }} className="px-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:border-red-500 text-gray-900 bg-white">
               {SORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
-            <label className="flex items-center gap-2 px-4 py-3 rounded-lg border border-gray-300 cursor-pointer hover:border-gray-400 bg-white">
-              <input type="checkbox" checked={showEvaluating} onChange={e => { setShowEvaluating(e.target.checked); setPage(1) }} className="rounded" />
-              <span className="text-sm text-gray-600 whitespace-nowrap">RFPs Under Eval</span>
-            </label>
+            <select value={agency} onChange={e => { setAgency(e.target.value); setPage(1) }} className="px-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:border-red-500 text-gray-900 bg-white">
+              {agencies.length > 0
+                ? agencies.map(a => <option key={a} value={a}>{a === 'All' ? 'All Agencies' : a}</option>)
+                : <option value="All">All Agencies</option>
+              }
+            </select>
             <button
               onClick={() => { setShowFuture(f => !f); setPage(1) }}
               className={"px-4 py-3 rounded-lg border-2 text-sm font-semibold transition-all whitespace-nowrap " + (showFuture ? "text-white border-transparent" : "bg-white border-gray-300 text-gray-600 hover:border-gray-400")}
