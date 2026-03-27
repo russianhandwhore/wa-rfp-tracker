@@ -482,10 +482,10 @@ export default function App() {
               <button
                 key={cat}
                 onClick={() => { setCategory(cat); setPage(1) }}
-                className={"px-3 py-1.5 rounded-full text-xs font-semibold border transition-all " + (category === cat ? "text-white border-transparent" : "bg-white hover:bg-gray-50 " + getCategoryColor(cat))}
-                style={category === cat ? { backgroundColor: '#EE0000', borderColor: '#EE0000' } : {}}
+                className={"px-3 py-1.5 rounded-full text-xs font-semibold border transition-all " + (category === cat ? "bg-gray-900 text-white border-gray-900" : "bg-white text-gray-700 border-gray-300 hover:border-gray-500")}
+
               >
-                {cat === 'All' ? '🔍 All' : cat === 'IT' ? '💻 IT' : cat === 'Construction' ? '🏗️ Construction' : cat === 'Supplies' ? '📦 Supplies' : cat === 'Services' ? '🤝 Services' : '📋 Misc'}
+                {cat}
               </button>
             ))}
           </div>
