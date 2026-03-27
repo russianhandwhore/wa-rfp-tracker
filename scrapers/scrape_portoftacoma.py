@@ -178,13 +178,17 @@ def fetch_detail(url, fallback_title=None):
         if m:
             bid_num = m.group(1).strip()
 
-        # Bids Due date
+        # Bids Due date — fall back to Questions Due if no Bids Due field
         bids_due = None
         m = re.search(r'Bids Due:\s*([\w,/:\s\-APM]+?)(?:\s{2,}|Pre-Bid|Questions Due|Contact:|Estimated|$)', page_text)
         if m:
             bids_due = parse_date(m.group(1))
+        if not bids_due:
+            m = re.search(r'Questions Due:\s*([\w,/:\s\-APM]+?)(?:\s{2,}|Pre-Bid|Bids Due|Contact:|Estimated|$)', page_text)
+            if m:
+                bids_due = parse_date(m.group(1))
 
-        # Skip if already expired or no due date (likely closed)
+        # Skip if no due date at all (likely closed or malformed)
         if not bids_due:
             return None
         if datetime.fromisoformat(bids_due) < datetime.now():
