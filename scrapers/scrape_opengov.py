@@ -16,6 +16,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from utils import get_supabase_client, generate_fingerprint, log_scrape, clean_text
+from categorize import categorize_rfp
 from bs4 import BeautifulSoup
 
 PORTALS = [
@@ -172,7 +173,7 @@ def rows_to_rfps(rows, portal):
             "source_platform": "OpenGov",
             "contact_name": None,
             "contact_email": None,
-            "categories": [],
+            "categories":      categorize_rfp(title, description),
             "includes_inclusion_plan": False,
         })
     return rfps

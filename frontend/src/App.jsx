@@ -100,12 +100,11 @@ export default function App() {
     if (search) query = query.ilike('title', '%' + search + '%')
     if (platform !== 'All') query = query.eq('source_platform', platform)
     if (agency !== 'All') query = query.eq('agency', agency)
-    if (category !== 'All') query = query.contains('categories', [category])
     const { data, count, error } = await query
     if (!error) {
       const filtered = (data || []).filter(r => {
         if (isBlankCard(r)) return false
-
+        if (!matchesCategory(r, category)) return false
         if (!showEvaluating) {
           try {
             const raw = JSON.parse(r.raw_data || '{}')
@@ -140,14 +139,25 @@ export default function App() {
   }
 
   function getCategoryColor(cat) {
-    const colors = {
-      IT: 'bg-blue-50 text-blue-700 border-blue-200',
-      Construction: 'bg-orange-50 text-orange-700 border-orange-200',
-      Supplies: 'bg-green-50 text-green-700 border-green-200',
-      Services: 'bg-purple-50 text-purple-700 border-purple-200',
-      Misc: 'bg-gray-50 text-gray-700 border-gray-200',
+    return 'bg-white text-gray-600 border-gray-300'
+  }
+
+  const CATEGORY_KEYWORDS = {
+    IT: ['technology','software','hardware','telecom','network','cyber','\\bIT\\b','computer','digital','\\bdata\\b','database','cloud','fiber','wireless','internet','\\bweb\\b','saas','server','license','microsoft','oracle','cisco','audiovisual','surveillance','camera','cameras','adobe','\\bhp\\b','dell','asus','lenovo','\\bibm\\b','scada','low voltage','physical security','security','\\bai\\b','artificial intelligence','machine learning','information technology'],
+    Construction: ['construction','building','renovation','repair','maintenance','\\broad\\b','bridge','facility','concrete','electrical','plumbing','hvac','roofing','demolition','civil','contractor','architect','structural','pavement','sidewalk','trail','irrigation','sewer','welding','painting'],
+    Supplies: ['supplies','equipment','materials','furniture','vehicle','fleet','uniform','\\bgoods\\b','\\bparts\\b','commodity','tools','machinery','fuel','office supply','printing'],
+    Services: ['services','consulting','professional','staffing','legal','audit','marketing','training','janitorial','cleaning','landscaping','security guard','catering','translation','survey','inspection','testing','planning','research','financial','accounting','insurance','waste','recycling'],
+  }
+
+  function matchesCategory(rfp, cat) {
+    if (cat === 'All') return true
+    const text = ((rfp.title || '') + ' ' + (rfp.description || '')).toLowerCase()
+    const keywords = CATEGORY_KEYWORDS[cat]
+    if (!keywords) {
+      // Misc = matches none of the other categories
+      return !Object.values(CATEGORY_KEYWORDS).flat().some(kw => new RegExp(kw, 'i').test(text))
     }
-    return colors[cat] || 'bg-gray-50 text-gray-700 border-gray-200'
+    return keywords.some(kw => new RegExp(kw, 'i').test(text))
   }
 
   function getDocuments(rfp) {

@@ -12,6 +12,7 @@ import os
 from datetime import datetime
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from utils import get_supabase_client, generate_fingerprint, log_scrape, clean_text
+from categorize import categorize_rfp
 
 SOURCE_NAME = "Sound Transit Biddingo"
 PLATFORM    = "Sound Transit"
@@ -78,7 +79,7 @@ def item_to_rfp(item):
         "source_platform":       PLATFORM,
         "contact_name":          None,
         "contact_email":         None,
-        "categories":            [],
+        "categories":      categorize_rfp(title, None),
         "includes_inclusion_plan": False,
     }
 

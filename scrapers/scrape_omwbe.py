@@ -16,6 +16,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from utils import get_supabase_client, generate_fingerprint, log_scrape, clean_text
+from categorize import categorize_rfp
 
 SOURCE_URL = "https://omwbe.wa.gov/small-business-assistance/bids-contracting-opportunities"
 BASE_URL = "https://omwbe.wa.gov"
@@ -269,7 +270,7 @@ def scrape_listings():
             "posted_date": None,
             "rfp_type": None,
             "includes_inclusion_plan": False,
-            "categories": [],
+            "categories":      categorize_rfp(rec["title"], desc),
             "raw_data": None,
             "fingerprint": rec["fingerprint"],
         }

@@ -12,6 +12,7 @@ import os
 from datetime import datetime
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from utils import get_supabase_client, generate_fingerprint, log_scrape, clean_text
+from categorize import categorize_rfp
 
 SOURCE_NAME  = "Port of Seattle VendorConnect"
 PLATFORM     = "Port of Seattle"
@@ -176,7 +177,7 @@ def item_to_rfp(item, detail=None, is_future=False):
         "source_platform":       PLATFORM,
         "contact_name":          contact_name,
         "contact_email":         contact_email,
-        "categories":            [],
+        "categories":      categorize_rfp(title, description),
         "includes_inclusion_plan": False,
     }
 

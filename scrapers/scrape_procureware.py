@@ -17,6 +17,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from utils import get_supabase_client, generate_fingerprint, log_scrape, clean_text
+from categorize import categorize_rfp
 from bs4 import BeautifulSoup
 from dateutil import parser as dateutil_parser
 
@@ -163,7 +164,7 @@ def make_empty_record(portal):
         "detail_url": None,
         "rfp_type": None,
         "includes_inclusion_plan": False,
-        "categories": [],
+        "categories":      categorize_rfp(title, description),
         "raw_data": None,
         "fingerprint": None,
     }

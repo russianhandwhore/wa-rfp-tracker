@@ -21,6 +21,7 @@ import os
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from utils import get_supabase_client, generate_fingerprint, log_scrape, clean_text
+from categorize import categorize_rfp
 
 from bs4 import BeautifulSoup
 
@@ -155,7 +156,7 @@ def build_rfp(record):
         "posted_date":     record["posting_date"],
         "rfp_type":        record["sol_type"] or None,
         "includes_inclusion_plan": False,
-        "categories":      [],
+        "categories":      categorize_rfp(record["title"], None),
         "fingerprint":     fingerprint,
         "raw_data":        json.dumps({
             "solicitation_id":  sol_id,

@@ -6,6 +6,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from utils import get_supabase_client, generate_fingerprint, log_scrape, clean_text
+from categorize import categorize_rfp
 import re
 from bs4 import BeautifulSoup
 
@@ -158,7 +159,7 @@ def make_empty_record():
         "rfp_type": None,
         "includes_inclusion_plan": False,
         "raw_data": None,
-        "categories": [],
+        "categories":      categorize_rfp(title, description),
         # Internal — stripped before upsert
         "_description_lines": [],
         "_prebid_datetime": None,

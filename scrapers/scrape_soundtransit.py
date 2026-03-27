@@ -23,6 +23,7 @@ import os
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from utils import get_supabase_client, generate_fingerprint, log_scrape, clean_text
+from categorize import categorize_rfp
 
 try:
     import pdfplumber
@@ -224,7 +225,7 @@ def build_records(rows):
             "posted_date":     row["solicitation_date"],
             "rfp_type":        row["process"] or None,
             "includes_inclusion_plan": False,
-            "categories":      [],
+            "categories":      categorize_rfp(title, None),
             "fingerprint":     fingerprint,
             "raw_data":        json.dumps({
                 "phase":             phase_info["label"],
