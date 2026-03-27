@@ -106,10 +106,12 @@ def get_open_links():
                 seen.add(full_url)
                 bid_num      = clean_text(cells[0].get_text())
                 service_type = clean_text(cells[2].get_text())
+                title_from_table = clean_text(link.get_text())
                 links.append({
                     "url":          full_url,
                     "bid_num":      bid_num,
                     "service_type": service_type,
+                    "title":        title_from_table,
                 })
 
         print(f"  Page {page}: {rows_found} rows, {len([l for l in links if l])} open so far")
@@ -125,7 +127,7 @@ def get_open_links():
     return links
 
 
-def fetch_detail(url):
+def fetch_detail(url, fallback_title=None):
     """
     Fetch one Port of Tacoma procurement detail page.
     Returns a dict of parsed fields, or None if closed/expired/invalid.
@@ -148,11 +150,22 @@ def fetch_detail(url):
                 title = text
                 break
 
-        # Fallback: page <title> minus site name
+        # Fallback 1: use title passed from listing table
+        if not title and fallback_title:
+            title = fallback_title
+
+        # Fallback 2: page <title> minus site name
         if not title:
             page_title = soup.find("title")
             if page_title:
-                title = clean_text(page_title.get_text()).replace(" | Port of Tacoma", "").strip()
+                t = clean_text(page_title.get_text()).replace(" | Port of Tacoma", "").strip()
+                # Only use if it doesn't look like a generic portal page
+                if t and "portal" not in t.lower() and "submission" not in t.lower():
+                    title = t
+
+        # Last resort: use fallback even if it's the portal title
+        if not title and fallback_title:
+            title = fallback_title
 
         if not title:
             return None
@@ -251,7 +264,7 @@ def run():
         print(f"  Fetching {len(open_links)} detail pages ({DETAIL_WORKERS} at a time)...")
         details = []
         with ThreadPoolExecutor(max_workers=DETAIL_WORKERS) as executor:
-            future_to_entry = {executor.submit(fetch_detail, entry["url"]): entry for entry in open_links}
+            future_to_entry = {executor.submit(fetch_detail, entry["url"], entry.get("title")): entry for entry in open_links}
             for future in as_completed(future_to_entry):
                 entry = future_to_entry[future]
                 try:
@@ -265,9 +278,29 @@ def run():
                     # Use bid_num from listing if detail page didn't parse one
                     if not result.get("ref_number"):
                         result["ref_number"] = entry.get("bid_num")
+                    # Override title if detail parsed a generic portal title
+                    listing_title = entry.get("title", "")
+                    parsed_title  = result.get("title", "")
+                    if listing_title and (
+                        not parsed_title
+                        or "portal" in parsed_title.lower()
+                        or "submission" in parsed_title.lower()
+                        or "procurement" == parsed_title.lower()
+                    ):
+                        result["title"] = listing_title
                     details.append(result)
 
         print(f"  {len(details)} open (future due date) RFPs found")
+
+        # Dedup details by URL in case pagination returned any overlap
+        seen_urls = set()
+        unique_details = []
+        for d in details:
+            if d["detail_url"] not in seen_urls:
+                seen_urls.add(d["detail_url"])
+                unique_details.append(d)
+        details = unique_details
+        print(f"  {len(details)} unique RFPs after dedup")
 
         # Step 3: build and save RFP records
         for detail in details:
