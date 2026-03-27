@@ -178,20 +178,22 @@ def fetch_detail(url, fallback_title=None):
         if m:
             bid_num = m.group(1).strip()
 
-        # Bids Due date — fall back to Questions Due if no Bids Due field
+        # Bids Due date — extract MM/DD/YYYY directly after label
+        # Using simple date pattern avoids boundary issues with single-space page_text
         bids_due = None
-        m = re.search(r'Bids Due:\s*([\w,/:\s\-APM]+?)(?:\s{2,}|Pre-Bid|Questions Due|Contact:|Estimated|$)', page_text)
+        m = re.search(r'Bids Due:[^0-9]*?(\d{1,2}/\d{1,2}/\d{4})', page_text)
         if m:
             bids_due = parse_date(m.group(1))
         if not bids_due:
-            m = re.search(r'Questions Due:\s*([\w,/:\s\-APM]+?)(?:\s{2,}|Pre-Bid|Bids Due|Contact:|Estimated|$)', page_text)
+            m = re.search(r'Questions Due:[^0-9]*?(\d{1,2}/\d{1,2}/\d{4})', page_text)
             if m:
                 bids_due = parse_date(m.group(1))
 
-        # Skip if no due date at all (likely closed or malformed)
-        if not bids_due:
+        # Skip if already expired
+        if bids_due and datetime.fromisoformat(bids_due) < datetime.now():
             return None
-        if datetime.fromisoformat(bids_due) < datetime.now():
+        # Skip if no date found at all (likely malformed page)
+        if not bids_due:
             return None
 
         # Procurement Summary (description) — text between "Procurement Summary:" and next field
