@@ -273,21 +273,15 @@ def run():
                     print(f"    [WARN] {entry['url']}: {e}")
                     result = None
                 if result:
-                    # Enrich with service_type from listing table
-                    result["service_type"] = entry.get("service_type")
-                    # Use bid_num from listing if detail page didn't parse one
-                    if not result.get("ref_number"):
-                        result["ref_number"] = entry.get("bid_num")
-                    # Override title if detail parsed a generic portal title
+                    # Listing table is the authoritative source for title and ref number
+                    # Detail page enriches with description, contact, docs — never overrides identity
                     listing_title = entry.get("title", "")
-                    parsed_title  = result.get("title", "")
-                    if listing_title and (
-                        not parsed_title
-                        or "portal" in parsed_title.lower()
-                        or "submission" in parsed_title.lower()
-                        or "procurement" == parsed_title.lower()
-                    ):
+                    listing_bid   = entry.get("bid_num", "")
+                    if listing_title:
                         result["title"] = listing_title
+                    if listing_bid:
+                        result["ref_number"] = listing_bid
+                    result["service_type"] = entry.get("service_type")
                     details.append(result)
 
         print(f"  {len(details)} open (future due date) RFPs found")
