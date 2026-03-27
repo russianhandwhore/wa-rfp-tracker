@@ -219,7 +219,7 @@ def fetch_detail(url, fallback_title=None):
 
         # Documents — all S3 PDF links on the page
         docs = []
-        for a in soup.find_all("a", href=re.compile(r'portoftacoma\.com.*\.pdf', re.IGNORECASE)):
+        for a in soup.find_all("a", href=re.compile(r'portoftacoma\.com.*\.(pdf|docx|xlsx|doc|zip)', re.IGNORECASE)):
             doc_url  = a["href"]
             doc_name = clean_text(a.get_text()) or doc_url.split("/")[-1]
             docs.append({"name": doc_name, "url": doc_url})
@@ -305,10 +305,12 @@ def run():
         # Step 3: build and save RFP records
         for detail in details:
             categories  = categorize_rfp(detail["title"], detail["description"])
+            # Use detail_url as fingerprint basis — it's the true unique ID.
+            # ref_number can differ across listing table rows for the same page.
             fingerprint = generate_fingerprint(
-                detail["ref_number"] or detail["title"],
+                detail["detail_url"],
                 SOURCE_PLATFORM,
-                detail["due_date"] or "",
+                "",
             )
 
             all_rfps.append({
