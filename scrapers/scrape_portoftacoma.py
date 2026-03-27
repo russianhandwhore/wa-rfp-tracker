@@ -12,6 +12,7 @@ Static Drupal CMS — requests + BeautifulSoup only, no Playwright needed.
 
 import json
 import re
+import time
 import traceback
 import requests
 from bs4 import BeautifulSoup
@@ -40,14 +41,6 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.5",
 }
 
-# Sub-paths to exclude from the listing — these are not individual RFP pages
-EXCLUDE_PATHS = {
-    "/business/contracting/procurement",
-    "/business/contracting/procurement/awarded-contracts",
-    "/business/contracting/procurement/final-acceptance",
-    "/business/contracting",
-}
-
 
 def parse_date(date_str):
     """Parse dates like 'Wed, 04/22/2026 - 02:00PM' or '04/22/2026'."""
@@ -66,22 +59,70 @@ def parse_date(date_str):
     return None
 
 
-def get_detail_links(html):
-    """Extract all individual procurement detail page links from the listing page."""
-    soup = BeautifulSoup(html, "lxml")
-    links = set()
-    prefix = "/business/contracting/procurement/"
+def get_open_links():
+    """
+    Paginate through all procurement listing pages and return URLs of Open RFPs only.
+    Reads directly from the table rows — avoids picking up nav/footer links.
+    """
+    links = []
+    seen  = set()
+    page  = 0
 
-    for a in soup.find_all("a", href=True):
-        href = a["href"].rstrip("/")
-        # Must be under /procurement/ and not a known sub-page
-        if href.startswith(prefix) and href not in EXCLUDE_PATHS:
-            slug = href[len(prefix):]
-            # Only one level deep — no further sub-paths
-            if slug and "/" not in slug:
-                links.add(BASE_URL + href)
+    while True:
+        url = f"{LISTING_URL}?page={page}"
+        print(f"  Fetching listing page {page}: {url}")
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=20)
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"  [ERROR] Could not fetch listing page {page}: {e}")
+            break
 
-    return list(links)
+        soup  = BeautifulSoup(resp.text, "lxml")
+        table = soup.find("table")
+        if not table:
+            print(f"  No table found on page {page} — stopping pagination")
+            break
+
+        rows_found = 0
+        for row in table.find_all("tr"):
+            cells = row.find_all("td")
+            if len(cells) < 4:
+                continue
+
+            rows_found += 1
+            # Columns: Bid # | Title | Service Type | Status
+            status = clean_text(cells[3].get_text()).lower()
+            if status != "open":
+                continue
+
+            link = cells[1].find("a", href=True)
+            if not link:
+                continue
+
+            href = link["href"].rstrip("/")
+            full_url = BASE_URL + href if href.startswith("/") else href
+            if full_url not in seen:
+                seen.add(full_url)
+                bid_num      = clean_text(cells[0].get_text())
+                service_type = clean_text(cells[2].get_text())
+                links.append({
+                    "url":          full_url,
+                    "bid_num":      bid_num,
+                    "service_type": service_type,
+                })
+
+        print(f"  Page {page}: {rows_found} rows, {len([l for l in links if l])} open so far")
+
+        # Stop if no more pages — check for a "next page" link
+        next_link = soup.find("a", title=lambda t: t and "next page" in t.lower())
+        if not next_link:
+            break
+
+        page += 1
+        time.sleep(0.5)  # polite delay
+
+    return links
 
 
 def fetch_detail(url):
@@ -120,13 +161,13 @@ def fetch_detail(url):
 
         # Bid Number
         bid_num = None
-        m = re.search(r'Bid Number:\s*([A-Z0-9]+)', page_text)
+        m = re.search(r'Bid Number:\s*([A-Z0-9][\w\-]+)', page_text)
         if m:
             bid_num = m.group(1).strip()
 
         # Bids Due date
         bids_due = None
-        m = re.search(r'Bids Due:\s*([^\n]+)', page_text)
+        m = re.search(r'Bids Due:\s*([\w,/:\s\-APM]+?)(?:\s{2,}|Pre-Bid|Questions Due|Contact:|Estimated|$)', page_text)
         if m:
             bids_due = parse_date(m.group(1))
 
@@ -138,7 +179,7 @@ def fetch_detail(url):
 
         # Procurement Summary (description) — text between "Procurement Summary:" and next field
         description = None
-        m = re.search(r'Procurement Summary:\s*(.+?)(?:Contact:|Bids Due:|$)', page_text, re.DOTALL)
+        m = re.search(r'Procurement Summary:\s*(.+?)(?:Contact:|Bids Due:|Estimated Cost)', page_text)
         if m:
             desc = clean_text(m.group(1))
             description = desc[:600] if desc else None
@@ -197,31 +238,33 @@ def run():
     try:
         supabase = get_supabase_client()
 
-        # Step 1: fetch listing page and extract detail links
-        print(f"  Fetching listing: {LISTING_URL}")
-        resp = requests.get(LISTING_URL, headers=HEADERS, timeout=20)
-        resp.raise_for_status()
-        print(f"  Status: {resp.status_code} | {len(resp.text):,} chars")
+        # Step 1: paginate through listing and collect open RFP links
+        open_links = get_open_links()
+        print(f"  Found {len(open_links)} open procurement links across all pages")
 
-        detail_links = get_detail_links(resp.text)
-        print(f"  Found {len(detail_links)} procurement detail links")
-
-        if not detail_links:
-            raise RuntimeError("No detail links found — listing page structure may have changed")
+        if not open_links:
+            print("  [WARN] No open procurements found — all may be closed or page structure changed")
+            status = "success"
+            return
 
         # Step 2: fetch all detail pages concurrently
-        print(f"  Fetching {len(detail_links)} detail pages ({DETAIL_WORKERS} at a time)...")
+        print(f"  Fetching {len(open_links)} detail pages ({DETAIL_WORKERS} at a time)...")
         details = []
         with ThreadPoolExecutor(max_workers=DETAIL_WORKERS) as executor:
-            future_to_url = {executor.submit(fetch_detail, url): url for url in detail_links}
-            for future in as_completed(future_to_url):
-                url = future_to_url[future]
+            future_to_entry = {executor.submit(fetch_detail, entry["url"]): entry for entry in open_links}
+            for future in as_completed(future_to_entry):
+                entry = future_to_entry[future]
                 try:
                     result = future.result()
                 except Exception as e:
-                    print(f"    [WARN] {url}: {e}")
+                    print(f"    [WARN] {entry['url']}: {e}")
                     result = None
                 if result:
+                    # Enrich with service_type from listing table
+                    result["service_type"] = entry.get("service_type")
+                    # Use bid_num from listing if detail page didn't parse one
+                    if not result.get("ref_number"):
+                        result["ref_number"] = entry.get("bid_num")
                     details.append(result)
 
         print(f"  {len(details)} open (future due date) RFPs found")
@@ -245,7 +288,7 @@ def run():
                 "status":                  "active",
                 "description":             detail["description"],
                 "department":              None,
-                "rfp_type":                None,
+                "rfp_type":                detail.get("service_type") or None,
                 "agency":                  AGENCY,
                 "source_name":             SOURCE_NAME,
                 "source_platform":         SOURCE_PLATFORM,
